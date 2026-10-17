@@ -1,0 +1,930 @@
+import {
+  App,
+  Modal,
+  Notice,
+  Plugin,
+  PluginSettingTab,
+  Setting,
+  normalizePath,
+  requestUrl,
+  type RequestUrlParam,
+} from 'obsidian';
+import {
+  WereadClient,
+  checkCookie,
+  normalizeCookie,
+  type ArticleItem,
+  type HttpFn,
+  RiskError,
+} from './core/weread';
+import { htmlToMarkdown, replaceImagePlaceholders, safeFileName } from './core/html2md';
+import { WmcView, VIEW_TYPE_WMC } from './host/weread-view';
+import {
+  LLM_DEFAULTS,
+  PROVIDERS,
+  chat as llmChat,
+  summarize as llmSummarize,
+  testConnection as testLLM,
+  estimateTokens,
+  quotaToday,
+  checkQuota,
+  validateConfig,
+  type LLMSettings,
+  type ProviderId,
+} from './core/llm';
+
+/* ---------------------------------- types --------------------------------- */
+
+export interface AccountRef {
+  name: string;
+  bookId: string;
+}
+
+export interface WMSettings {
+  cookie: string;
+  accounts: AccountRef[];
+  outputDir: string;
+  listWidth: number;
+  llm: LLMSettings;
+  pages: number;
+  intervalMin: number;
+  maxPerRun: number;
+  maxPerAccount: number;
+  delayListMs: number;
+  delayContentMs: number;
+  downloadImages: boolean;
+  autoStart: boolean;
+}
+
+interface ProcessedEntry {
+  account: string;
+  title: string;
+  time: number;
+  path: string;
+  at: number;
+}
+
+interface DiscoveredEntry {
+  account: string;
+  title: string;
+  time: number;
+  readNum?: number;
+  likeNum?: number;
+  picUrl?: string;
+}
+
+interface WMState {
+  processed: Record<string, ProcessedEntry>;
+  discovered?: Record<string, DiscoveredEntry>;
+  read?: Record<string, number>;
+  llmQuota?: { day: string; count: number };
+  lastRun?: { at: number; found: number; written: number; skipped: number; error?: string };
+  watchSince?: number;
+}
+
+const DEFAULTS: WMSettings = {
+  cookie: '',
+  accounts: [],
+  outputDir: '微信读书公众号',
+  listWidth: 300,
+  llm: { ...LLM_DEFAULTS },
+  pages: 1,
+  intervalMin: 30,
+  maxPerRun: 6,
+  maxPerAccount: 2,
+  delayListMs: 1200,
+  delayContentMs: 2500,
+  downloadImages: true,
+  autoStart: false,
+};
+
+const MIN_INTERVAL = 15; // 风控下限：低于 15 分钟不进风控红线
+const ID = 'weread-mp-catcher';
+
+const sleep = (ms: number) => new Promise<void>((r) => window.setTimeout(r, ms));
+
+function fmtDate(sec: number): string {
+  if (!sec) return '';
+  const d = new Date(sec * 1000);
+  const p = (n: number) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+}
+
+function ymdNow(): string {
+  return fmtDate(Math.floor(Date.now() / 1000));
+}
+
+/** 按魔数判图片扩展名（微信 CDN 会把 PNG 挂在 .jpg 名下） */
+function guessExt(buf: ArrayBuffer): string {
+  const b = new Uint8Array(buf.slice(0, 12));
+  if (b[0] === 0xff && b[1] === 0xd8) return 'jpg';
+  if (b[0] === 0x89 && b[1] === 0x50) return 'png';
+  if (b[0] === 0x47 && b[1] === 0x49) return 'gif';
+  if (b[0] === 0x52 && b[1] === 0x49 && b[8] === 0x57) return 'webp';
+  return 'jpg';
+}
+
+/* --------------------------------- plugin --------------------------------- */
+
+export default class WereadMpCatcher extends Plugin {
+  settings: WMSettings = { ...DEFAULTS };
+  state: WMState = { processed: {} };
+  private timer: number | null = null;
+  private running = false;
+  private statusEl: HTMLElement | null = null;
+
+  private http: HttpFn = async (url: string, headers: Record<string, string>) => {
+    const param: RequestUrlParam = { url, method: 'GET', headers, throw: false };
+    const r = await requestUrl(param);
+    return { status: r.status, text: r.text, bytes: r.arrayBuffer };
+  };
+
+  async onload() {
+    await this.loadAll();
+
+    this.statusEl = this.addStatusBarItem();
+    this.renderStatus();
+
+    this.registerView(VIEW_TYPE_WMC, (leaf) => new WmcView(leaf, this));
+    this.addRibbonIcon('rss', '微信读书公众号：打开列表', () => void this.activateView());
+    this.addCommand({
+      id: 'open-list',
+      name: '打开公众号列表',
+      callback: () => void this.activateView(),
+    });
+
+    this.addCommand({
+      id: 'fetch-now',
+      name: '立即抓取一轮',
+      callback: () => void this.runOnce(true),
+    });
+    this.addCommand({
+      id: 'toggle-watch',
+      name: '开始 / 停止自动盯采',
+      callback: () => (this.timer ? this.stopWatch(true) : this.startWatch(true)),
+    });
+    this.addCommand({
+      id: 'open-login',
+      name: '打开微信读书登录窗口',
+      callback: () => this.openLoginWindow(),
+    });
+
+    this.addSettingTab(new WMSettingTab(this.app, this));
+
+    if (this.settings.autoStart) this.startWatch(false);
+  }
+
+  onunload() {
+    this.stopWatch(false);
+    this.statusEl?.remove();
+    this.statusEl = null;
+  }
+
+  /* ------------------------------- persistence ------------------------------ */
+
+  async loadAll() {
+    const raw = (await this.loadData()) as { settings?: Partial<WMSettings>; state?: WMState } | null;
+    this.settings = { ...DEFAULTS, ...(raw?.settings ?? {}) };
+    this.state = raw?.state ?? { processed: {} };
+    if (!this.state.processed) this.state.processed = {};
+  }
+
+  async saveAll() {
+    await this.saveData({ settings: this.settings, state: this.state });
+  }
+
+  /* --------------------------------- cookie -------------------------------- */
+
+  /** 尝试从 Obsidian(Electron) session 读取 weread cookie；不可用时返回 null */
+  async tryReadSessionCookie(): Promise<string | null> {
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      const electron: any = (window as any).require?.('electron');
+      const remote = electron?.remote;
+      const session = remote?.session?.defaultSession;
+      if (!session?.cookies?.get) return null;
+      const list: Array<{ name: string; value: string; domain: string }> = await session.cookies.get({
+        domain: '.weread.qq.com',
+      });
+      if (!list?.length) return null;
+      return list.map((c) => `${c.name}=${c.value}`).join('; ');
+    } catch {
+      return null;
+    }
+  }
+
+  /** 打开登录窗口（Electron 新窗口，与 Obsidian 共享 session） */
+  openLoginWindow() {
+    const w = window.open('https://weread.qq.com/', '_blank');
+    if (!w) {
+      new Notice('无法打开窗口：请改用浏览器登录后粘贴 Cookie');
+      return;
+    }
+    new Notice('扫码登录后回到 Obsidian，点击设置里的「读取登录态」', 8000);
+  }
+
+  async importSessionCookie(): Promise<boolean> {
+    const ck = await this.tryReadSessionCookie();
+    if (!ck) return false;
+    this.settings.cookie = ck;
+    await this.saveAll();
+    return true;
+  }
+
+  /* -------------------------------- watching ------------------------------- */
+
+  startWatch(notify: boolean) {
+    const min = Math.max(MIN_INTERVAL, Math.round(this.settings.intervalMin || 30));
+    this.stopWatch(false);
+    this.state.watchSince = Date.now();
+    this.timer = window.setInterval(() => void this.runOnce(false), min * 60 * 1000);
+    this.registerInterval(this.timer);
+    this.renderStatus();
+    if (notify) new Notice(`自动盯采已开启：每 ${min} 分钟一轮`);
+  }
+
+  stopWatch(notify: boolean) {
+    if (this.timer !== null) {
+      window.clearInterval(this.timer);
+      this.timer = null;
+    }
+    this.renderStatus();
+    if (notify) new Notice('自动盯采已停止');
+  }
+
+  private renderStatus() {
+    if (!this.statusEl) return;
+    const last = this.state.lastRun;
+    const watching = this.timer !== null;
+    const icon = watching ? '●' : '○';
+    const tail = last
+      ? last.error
+        ? `错误：${last.error.slice(0, 22)}`
+        : `+${last.written}/${last.found}`
+      : '未运行';
+    this.statusEl.setText(`微信读书 ${icon} ${tail}`);
+  }
+
+  /* --------------------------------- fetch --------------------------------- */
+
+  async runOnce(manual: boolean) {
+    if (this.running) {
+      if (manual) new Notice('上一轮还在跑');
+      return;
+    }
+    const cookie = normalizeCookie(this.settings.cookie || '');
+    if (!cookie) {
+      if (manual) new Notice('还没登录：设置里粘贴 Cookie 或点击「打开登录窗口」');
+      return;
+    }
+    const chk = checkCookie(cookie);
+    if (!chk.ok) {
+      if (manual) new Notice(`Cookie 不完整，缺：${chk.missing.join(', ')}（缺 wr_gid 会报 -2012）`, 8000);
+    }
+    const accounts = this.settings.accounts.filter((a) => a.bookId?.startsWith('MP_WXS_'));
+    if (!accounts.length) {
+      if (manual) new Notice('还没有公众号：设置里添加 bookId（MP_WXS_xxx）');
+      return;
+    }
+
+    this.running = true;
+    const client = new WereadClient(this.http, cookie);
+    let found = 0;
+    let written = 0;
+    let skipped = 0;
+    let riskHit = false;
+
+    try {
+      // ① 收集新条目（按号轮转，保证公平）
+      const queueByAccount: Array<{ acc: AccountRef; items: ArticleItem[] }> = [];
+      for (const acc of accounts) {
+        try {
+          const items = await client.listArticlesPages(acc.bookId, Math.max(1, this.settings.pages));
+          const fresh = items.filter((it) => !this.state.processed[it.reviewId]);
+          found += fresh.length;
+          // 记入发现清单，供列表页展示（含未归档条目）
+          if (!this.state.discovered) this.state.discovered = {};
+          for (const it of items) {
+            if (!this.state.discovered[it.reviewId]) {
+              this.state.discovered[it.reviewId] = {
+                account: acc.name,
+                title: it.title,
+                time: it.time,
+                readNum: it.readNum,
+                likeNum: it.likeNum,
+                picUrl: it.picUrl,
+              };
+            }
+          }
+          queueByAccount.push({ acc, items: fresh.slice(0, this.settings.maxPerAccount) });
+        } catch (e) {
+          if (e instanceof RiskError) throw e;
+          skipped++;
+        }
+        await sleep(this.settings.delayListMs);
+      }
+
+      // ② 轮转落盘
+      const queue: Array<{ acc: AccountRef; item: ArticleItem }> = [];
+      let round = 0;
+      while (queue.length < this.settings.maxPerRun) {
+        let added = 0;
+        for (const g of queueByAccount) {
+          const it = g.items[round];
+          if (it) {
+            queue.push({ acc: g.acc, item: it });
+            added++;
+            if (queue.length >= this.settings.maxPerRun) break;
+          }
+        }
+        if (!added) break;
+        round++;
+      }
+
+      for (const job of queue) {
+        if (riskHit) break;
+        try {
+          const ok = await this.fetchOne(client, job.acc, job.item);
+          if (ok) written++;
+          else skipped++;
+        } catch (e) {
+          if (e instanceof RiskError) {
+            riskHit = true;
+            new Notice(`命中风控 ${e.message}：本轮立即停止（不做重试）`, 10000);
+            break;
+          }
+          skipped++;
+        }
+        await sleep(this.settings.delayContentMs);
+      }
+
+      this.state.lastRun = { at: Date.now(), found, written, skipped, error: riskHit ? '风控熔断' : undefined };
+      await this.saveAll();
+      if (manual) {
+        new Notice(`抓取完成：发现 ${found} 篇新文，落盘 ${written} 篇${skipped ? `，跳过 ${skipped}` : ''}`);
+      }
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      this.state.lastRun = { at: Date.now(), found, written, skipped, error: msg };
+      await this.saveAll();
+      new Notice(`抓取中断：${msg}`);
+    } finally {
+      this.running = false;
+      this.renderStatus();
+    }
+  }
+
+  private async fetchOne(client: WereadClient, acc: AccountRef, item: ArticleItem): Promise<boolean> {
+    const html = await client.getContentHtml(item.reviewId);
+    const { markdown, images } = htmlToMarkdown(html);
+    if (!markdown.trim()) return false; // 纯视频/图片型推送无正文容器，预期跳过
+
+    const base = safeFileName(item.title || '(无标题)');
+    const dir = normalizePath(`${this.settings.outputDir}/${safeFileName(acc.name)}`);
+    const assetDir = normalizePath(`${this.settings.outputDir}/assets/${base}`);
+    await this.ensureFolder(dir);
+
+    // 图片本地化
+    const localPaths: string[] = [];
+    if (this.settings.downloadImages && images.length) {
+      await this.ensureFolder(assetDir);
+      for (let i = 0; i < images.length; i++) {
+        const img = images[i];
+        try {
+          const buf = await client.fetchImage(img.src);
+          const ext = guessExt(buf);
+          const rel = normalizePath(`${assetDir}/img-${i + 1}.${ext}`);
+          await this.app.vault.adapter.writeBinary(rel, buf);
+          localPaths[i] = normalizePath(`../assets/${base}/img-${i + 1}.${ext}`);
+        } catch {
+          localPaths[i] = '';
+        }
+        await sleep(Math.round(this.settings.delayContentMs / 2));
+      }
+    }
+
+    const bodyMd = replaceImagePlaceholders(markdown, localPaths);
+    const path = normalizePath(`${dir}/${base}.md`);
+    if (this.app.vault.getAbstractFileByPath(path)) return false; // 幂等
+
+    const published = fmtDate(item.time);
+    const fmTags = ['剪藏', '微信读书公众号'];
+    const note = [
+      '---',
+      `title: "${(item.title || '').replace(/"/g, '\\"')}"`,
+      `date: ${ymdNow()}`,
+      `source: "weread://${item.reviewId}"`,
+      `author: "${acc.name.replace(/"/g, '\\"')}"`,
+      `author_org: "${acc.name.replace(/"/g, '\\"')}（微信读书）"`,
+      'tags:',
+      ...fmTags.map((t) => `  - ${t}`),
+      item.readNum !== undefined ? `readNum: ${item.readNum}` : null,
+      item.likeNum !== undefined ? `likeNum: ${item.likeNum}` : null,
+      `published: ${published}`,
+      `created: ${ymdNow()}`,
+      '---',
+      '',
+      `# ${item.title || '(无标题)'}`,
+      '',
+      `> 来源：微信读书 · ${acc.name}${item.readNum !== undefined ? `｜阅读 ${item.readNum}` : ''}${
+        item.likeNum !== undefined ? ` · 赞 ${item.likeNum}` : ''
+      }｜发布 ${published}`,
+      '',
+      '## 正文',
+      '',
+      bodyMd,
+      '',
+    ]
+      .filter((x) => x !== null)
+      .join('\n');
+
+    await this.app.vault.create(path, note);
+    this.state.processed[item.reviewId] = {
+      account: acc.name,
+      title: item.title,
+      time: item.time,
+      path,
+      at: Date.now(),
+    };
+    return true;
+  }
+
+  private async ensureFolder(path: string) {
+    if (!path) return;
+    const segs = path.split('/');
+    let cur = '';
+    for (const s of segs) {
+      cur = cur ? `${cur}/${s}` : s;
+      if (!this.app.vault.getAbstractFileByPath(cur)) {
+        try {
+          await this.app.vault.createFolder(cur);
+        } catch {
+          /* 已存在/并发创建 */
+        }
+      }
+    }
+  }
+
+  /** 用当前 cookie 探测书架号数（设置页「测试连接」用） */
+  async testConnection(): Promise<string> {
+    const cookie = normalizeCookie(this.settings.cookie || '');
+    const chk = checkCookie(cookie);
+    if (!chk.ok) return `Cookie 不完整，缺 ${chk.missing.join(', ')}`;
+    const accounts = this.settings.accounts.filter((a) => a.bookId?.startsWith('MP_WXS_'));
+    if (!accounts.length) return 'Cookie 格式 OK（但还没添加公众号）';
+    const client = new WereadClient(this.http, cookie);
+    try {
+      const list = await client.listArticles(accounts[0].bookId, 0);
+      return `连接正常：首个号拉到 ${list.length} 条（${list[0]?.title?.slice(0, 18) ?? '无标题'}…）`;
+    } catch (e) {
+      return `连接失败：${e instanceof Error ? e.message : String(e)}`;
+    }
+  }
+
+  /* --------------------------- 列表视图 / 单篇 / AI --------------------------- */
+
+  async activateView(): Promise<void> {
+    const { workspace } = this.app;
+    let leaf = workspace.getLeavesOfType(VIEW_TYPE_WMC)[0];
+    if (!leaf) {
+      leaf = workspace.getRightLeaf(false) ?? workspace.getLeaf('tab');
+      await leaf.setViewState({ type: VIEW_TYPE_WMC, active: true });
+    }
+    workspace.revealLeaf(leaf);
+  }
+
+  isWatching(): boolean {
+    return this.timer !== null;
+  }
+
+  toggleWatchFromView(): void {
+    if (this.timer) this.stopWatch(true);
+    else this.startWatch(true);
+  }
+
+  accountNames(): string[] {
+    return this.settings.accounts.map((a) => a.name || a.bookId);
+  }
+
+  markRead(reviewId: string): void {
+    if (!this.state.read) this.state.read = {};
+    if (!this.state.read[reviewId]) {
+      this.state.read[reviewId] = Date.now();
+      void this.saveAll();
+    }
+  }
+
+  async readNoteBody(path: string): Promise<string> {
+    const f = this.app.vault.getAbstractFileByPath(path);
+    if (!f) return '';
+    const md = await this.app.vault.cachedRead(f as any);
+    const i = md.indexOf('## 正文');
+    return i >= 0 ? md.slice(i + 5) : md;
+  }
+
+  /** 列表里点「抓取并归档」走这里 */
+  async archiveSingle(reviewId: string, accountName: string): Promise<boolean> {
+    const acc = this.settings.accounts.find((a) => (a.name || a.bookId) === accountName);
+    if (!acc) {
+      new Notice('找不到该公众号配置');
+      return false;
+    }
+    const d = this.state.discovered?.[reviewId];
+    const item: ArticleItem = {
+      reviewId,
+      title: d?.title ?? '(无标题)',
+      time: d?.time ?? Math.floor(Date.now() / 1000),
+      readNum: d?.readNum,
+      likeNum: d?.likeNum,
+      mpName: acc.name,
+    };
+    const cookie = normalizeCookie(this.settings.cookie || '');
+    if (!cookie) {
+      new Notice('还没登录：设置里填 Cookie');
+      return false;
+    }
+    const client = new WereadClient(this.http, cookie);
+    try {
+      const ok = await this.fetchOne(client, acc, item);
+      if (ok) await this.saveAll();
+      return ok;
+    } catch (e) {
+      new Notice(`抓取失败：${e instanceof Error ? e.message : String(e)}`);
+      return false;
+    }
+  }
+
+  /** LLM 的 http 适配（requestUrl 支持 POST） */
+  private llmHttp = async (url: string, headers: Record<string, string>, method: string, body?: string) => {
+    const r = await requestUrl({ url, method, headers, body, throw: false });
+    return { status: r.status, text: r.text };
+  };
+
+  async testLLMConnection(): Promise<string> {
+    try {
+      return await testLLM(this.llmHttp, this.settings.llm);
+    } catch (e) {
+      return `失败：${e instanceof Error ? e.message : String(e)}`;
+    }
+  }
+
+  /** 总结正文 → 写回笔记「## AI 摘要」（幂等） */
+  async aiSummarizeNote(path: string, title: string, body: string): Promise<boolean> {
+    const cfg = this.settings.llm;
+    const bad = validateConfig(cfg);
+    if (bad) {
+      new Notice(`LLM 未配置：${bad}`);
+      return false;
+    }
+    this.state.llmQuota = quotaToday(this.state.llmQuota, ymdNow());
+    try {
+      checkQuota(cfg, this.state.llmQuota);
+    } catch (e) {
+      new Notice(e instanceof Error ? e.message : String(e));
+      return false;
+    }
+
+    const text = await llmSummarize(this.llmHttp, cfg, title, body);
+    this.state.llmQuota.count++;
+    const stamp = new Date().toLocaleString();
+    const block = `\n\n## AI 摘要\n\n> ${cfg.model} · ${stamp}\n\n${text}\n`;
+    const f = this.app.vault.getAbstractFileByPath(path);
+    if (!f) return false;
+    const md = await this.app.vault.cachedRead(f as any);
+    const marker = '## AI 摘要';
+    const next = md.includes(marker)
+      ? md.slice(0, md.indexOf(marker)).replace(/\s+$/, '') + block
+      : md.replace(/\s+$/, '') + block;
+    await this.app.vault.process(f as any, () => next);
+    await this.saveAll();
+    return true;
+  }
+}
+
+/* -------------------------------- settings -------------------------------- */
+
+class WMSettingTab extends PluginSettingTab {
+  plugin: WereadMpCatcher;
+  private accountsDraft = '';
+
+  constructor(app: App, plugin: WereadMpCatcher) {
+    super(app, plugin);
+    this.plugin = plugin;
+  }
+
+  display(): void {
+    const { containerEl } = this;
+    containerEl.empty();
+    containerEl.addClass('wmc-settings');
+
+    /* 1. 登录 */
+    containerEl.createEl('h3', { text: '登录' });
+    new Setting(containerEl)
+      .setName('微信读书 Cookie')
+      .setDesc('需要 wr_vid / wr_skey / wr_rt / wr_gid 四项（缺 wr_gid 会报 -2012）')
+      .addTextArea((t) => {
+        t.setValue(this.plugin.settings.cookie)
+          .setPlaceholder('wr_vid=…; wr_skey=…; wr_rt=…; wr_gid=…')
+          .onChange(async (v) => {
+            this.plugin.settings.cookie = v;
+            await this.plugin.saveAll();
+          });
+        t.inputEl.rows = 3;
+        t.inputEl.addClass('wmc-cookie');
+      });
+
+    new Setting(containerEl)
+      .setName('登录方式')
+      .setDesc('打开登录窗口扫码后，尝试自动读取登录态；读不到就手动粘贴 Cookie')
+      .addButton((b) =>
+        b.setButtonText('打开登录窗口').onClick(() => this.plugin.openLoginWindow()),
+      )
+      .addButton((b) =>
+        b
+          .setButtonText('读取登录态')
+          .onClick(async () => {
+            const ok = await this.plugin.importSessionCookie();
+            new Notice(ok ? '已读取登录态并保存' : '读取失败：请手动粘贴 Cookie');
+            if (ok) this.display();
+          }),
+      )
+      .addButton((b) =>
+        b.setButtonText('测试连接').onClick(async () => {
+          const msg = await this.plugin.testConnection();
+          new Notice(msg, 8000);
+        }),
+      );
+
+    /* 2. 公众号 */
+    containerEl.createEl('h3', { text: '公众号' });
+    const accWrap = containerEl.createDiv('wmc-accounts');
+    if (!this.plugin.settings.accounts.length) {
+      accWrap.createEl('p', { text: '还没有添加公众号。', cls: 'wmc-empty' });
+    }
+    this.plugin.settings.accounts.forEach((acc, idx) => {
+      new Setting(accWrap)
+        .setName(acc.name || acc.bookId)
+        .setDesc(acc.bookId)
+        .addExtraButton((b) =>
+          b
+            .setIcon('trash')
+            .onClick(async () => {
+              this.plugin.settings.accounts.splice(idx, 1);
+              await this.plugin.saveAll();
+              this.display();
+            }),
+        );
+    });
+
+    new Setting(containerEl)
+      .setName('添加公众号')
+      .setDesc('一行一个：名称 | MP_WXS_xxx（也可粘贴阅读页 URL）')
+      .addTextArea((t) => {
+        t.setPlaceholder('机器之心 | MP_WXS_3073282833\n量子位 | MP_WXS_3236757533');
+        t.inputEl.rows = 3;
+        t.inputEl.addClass('wmc-accounts-input');
+        t.onChange((v) => (this.accountsDraft = v));
+      })
+      .addButton((b) =>
+        b.setButtonText('添加').onClick(async () => {
+          const added = this.parseAccounts(this.accountsDraft);
+          if (!added) {
+            new Notice('没识别到 bookId（需要 MP_WXS_ 开头）');
+            return;
+          }
+          this.plugin.settings.accounts.push(...added);
+          await this.plugin.saveAll();
+          this.accountsDraft = '';
+          this.display();
+        }),
+      );
+
+    /* 3. 输出与节奏 */
+    containerEl.createEl('h3', { text: '输出' });
+    new Setting(containerEl)
+      .setName('笔记目录')
+      .setDesc('库内相对路径，图片落在 <目录>/assets/<标题>/')
+      .addText((t) =>
+        t.setValue(this.plugin.settings.outputDir).onChange(async (v) => {
+          this.plugin.settings.outputDir = v.trim() || DEFAULTS.outputDir;
+          await this.plugin.saveAll();
+        }),
+      );
+
+    containerEl.createEl('h3', { text: '盯采节奏' });
+    new Setting(containerEl)
+      .setName('轮询间隔（分钟）')
+      .setDesc('下限 15 分钟；公众号发文是小时级，30 分钟即准实时')
+      .addText((t) =>
+        t.setValue(String(this.plugin.settings.intervalMin)).onChange(async (v) => {
+          const n = Number(v);
+          if (Number.isFinite(n) && n > 0) {
+            this.plugin.settings.intervalMin = Math.max(MIN_INTERVAL, Math.round(n));
+            await this.plugin.saveAll();
+          }
+        }),
+      );
+
+    new Setting(containerEl)
+      .setName('每号检查条数 / 翻页数')
+      .setDesc('每页 20 条；翻页越多越耗请求')
+      .addText((t) =>
+        t.setValue(String(this.plugin.settings.pages)).onChange(async (v) => {
+          const n = Number(v);
+          if (Number.isFinite(n) && n >= 1) {
+            this.plugin.settings.pages = Math.min(5, Math.round(n));
+            await this.plugin.saveAll();
+          }
+        }),
+      );
+
+    new Setting(containerEl)
+      .setName('单轮上限 / 每号上限')
+      .setDesc('控制单轮落盘量，避免一次性抓太多')
+      .addText((t) =>
+        t.setValue(String(this.plugin.settings.maxPerRun)).onChange(async (v) => {
+          const n = Number(v);
+          if (Number.isFinite(n) && n >= 1) {
+            this.plugin.settings.maxPerRun = Math.min(30, Math.round(n));
+            await this.plugin.saveAll();
+          }
+        }),
+      )
+      .addText((t) =>
+        t.setValue(String(this.plugin.settings.maxPerAccount)).onChange(async (v) => {
+          const n = Number(v);
+          if (Number.isFinite(n) && n >= 1) {
+            this.plugin.settings.maxPerAccount = Math.min(10, Math.round(n));
+            await this.plugin.saveAll();
+          }
+        }),
+      );
+
+    new Setting(containerEl)
+      .setName('图片本地化')
+      .setDesc('下载正文图片到库内 assets，避免外链失效')
+      .addToggle((t) =>
+        t.setValue(this.plugin.settings.downloadImages).onChange(async (v) => {
+          this.plugin.settings.downloadImages = v;
+          await this.plugin.saveAll();
+        }),
+      );
+
+    new Setting(containerEl)
+      .setName('启动时自动盯采')
+      .setDesc('Obsidian 打开后自动开始轮询')
+      .addToggle((t) =>
+        t.setValue(this.plugin.settings.autoStart).onChange(async (v) => {
+          this.plugin.settings.autoStart = v;
+          await this.plugin.saveAll();
+        }),
+      );
+
+    /* 4. AI 模型 */
+    containerEl.createEl('h3', { text: 'AI 模型（可选）' });
+    const llm = this.plugin.settings.llm;
+
+    new Setting(containerEl)
+      .setName('服务商')
+      .setDesc(PROVIDERS[llm.provider]?.note ?? '任何 OpenAI 兼容端点')
+      .addDropdown((d) => {
+        for (const [id, p] of Object.entries(PROVIDERS)) d.addOption(id, p.label);
+        d.setValue(llm.provider);
+        d.onChange(async (v) => {
+          llm.provider = v as ProviderId;
+          const preset = PROVIDERS[v as ProviderId];
+          if (preset?.baseUrl) llm.baseUrl = preset.baseUrl;
+          if (preset?.model) llm.model = preset.model;
+          await this.plugin.saveAll();
+          this.display();
+        });
+      });
+
+    new Setting(containerEl)
+      .setName('Base URL')
+      .setDesc('OpenAI 兼容地址，例如 https://api.deepseek.com/v1')
+      .addText((t) =>
+        t.setValue(llm.baseUrl).onChange(async (v) => {
+          llm.baseUrl = v.trim();
+          await this.plugin.saveAll();
+        }),
+      );
+
+    new Setting(containerEl)
+      .setName('API Key')
+      .setDesc('只存在本库插件数据里；本地 Ollama 可留空')
+      .addText((t) => {
+        t.setValue(llm.apiKey);
+        t.inputEl.type = 'password';
+        t.onChange(async (v) => {
+          llm.apiKey = v.trim();
+          await this.plugin.saveAll();
+        });
+      });
+
+    new Setting(containerEl)
+      .setName('模型名')
+      .addText((t) =>
+        t.setValue(llm.model).onChange(async (v) => {
+          llm.model = v.trim();
+          await this.plugin.saveAll();
+        }),
+      );
+
+    new Setting(containerEl)
+      .setName('温度 / 最大输出')
+      .addText((t) =>
+        t.setValue(String(llm.temperature)).onChange(async (v) => {
+          const n = Number(v);
+          if (Number.isFinite(n) && n >= 0 && n <= 2) {
+            llm.temperature = n;
+            await this.plugin.saveAll();
+          }
+        }),
+      )
+      .addText((t) =>
+        t.setValue(String(llm.maxTokens)).onChange(async (v) => {
+          const n = Number(v);
+          if (Number.isFinite(n) && n >= 64) {
+            llm.maxTokens = Math.min(8000, Math.round(n));
+            await this.plugin.saveAll();
+          }
+        }),
+      );
+
+    new Setting(containerEl)
+      .setName('每日调用上限')
+      .setDesc(`今天已用 ${this.plugin.state.llmQuota?.count ?? 0} 次`)
+      .addText((t) =>
+        t.setValue(String(llm.dailyCallLimit)).onChange(async (v) => {
+          const n = Number(v);
+          if (Number.isFinite(n) && n >= 1) {
+            llm.dailyCallLimit = Math.round(n);
+            await this.plugin.saveAll();
+          }
+        }),
+      );
+
+    new Setting(containerEl)
+      .setName('入库自动摘要')
+      .setDesc('默认关。开启后每篇归档完成自动调一次模型（约 ¥0.01/篇）')
+      .addToggle((t) =>
+        t.setValue(llm.autoSummarize).onChange(async (v) => {
+          llm.autoSummarize = v;
+          await this.plugin.saveAll();
+        }),
+      );
+
+    new Setting(containerEl).setName('测试连接').addButton((b) =>
+      b.setButtonText('测一下').onClick(async () => {
+        new Notice('测试中…', 3000);
+        new Notice(await this.plugin.testLLMConnection(), 8000);
+      }),
+    );
+
+    /* 5. 状态 */
+    containerEl.createEl('h3', { text: '状态' });
+    const last = this.plugin.state.lastRun;
+    const st = containerEl.createDiv('wmc-status');
+    st.createEl('p', {
+      text: last
+        ? `上次运行 ${new Date(last.at).toLocaleString()}｜发现 ${last.found}｜落盘 ${last.written}｜跳过 ${last.skipped}${
+            last.error ? `｜${last.error}` : ''
+          }`
+        : '还没有运行记录',
+    });
+    st.createEl('p', { text: `已归档：${Object.keys(this.plugin.state.processed).length} 篇` });
+
+    new Setting(containerEl)
+      .setName('立即抓取一轮')
+      .addButton((b) =>
+        b
+          .setButtonText('抓取')
+          .setCta()
+          .onClick(() => void this.plugin.runOnce(true)),
+      )
+      .addButton((b) =>
+        b.setButtonText('清空已归档记录').onClick(async () => {
+          this.plugin.state.processed = {};
+          await this.plugin.saveAll();
+          new Notice('已清空（不会删除已有笔记，但会重复抓取）');
+          this.display();
+        }),
+      );
+  }
+
+  private parseAccounts(raw: string): AccountRef[] {
+    const out: AccountRef[] = [];
+    for (const line of raw.split('\n')) {
+      const s = line.trim();
+      if (!s) continue;
+      const m = /MP_WXS_\d+/.exec(s);
+      if (!m) continue;
+      const bookId = m[0];
+      let name = s.replace(m[0], '').replace(/[|｜,，\t]+/g, ' ').trim();
+      if (!name) name = bookId;
+      out.push({ name, bookId });
+    }
+    return out;
+  }
+}

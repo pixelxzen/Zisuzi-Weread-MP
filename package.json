@@ -1,0 +1,26 @@
+{
+  "name": "weread-mp-catcher",
+  "version": "0.2.0",
+  "description": "微信读书公众号盯采：登录后自动抓取书架公众号更新，归档为 Obsidian 笔记。",
+  "main": "main.js",
+  "type": "module",
+  "scripts": {
+    "dev": "node esbuild.config.mjs",
+    "build": "tsc -noEmit -skipLibCheck && node esbuild.config.mjs production",
+    "test": "node --test tests/*.test.mjs"
+  },
+  "keywords": [
+    "obsidian",
+    "weread",
+    "wechat",
+    "rss",
+    "archive"
+  ],
+  "license": "GPL-3.0-only",
+  "devDependencies": {
+    "@types/node": "^22.15.17",
+    "esbuild": "0.25.5",
+    "obsidian": "latest",
+    "typescript": "^5.8.3"
+  }
+}
