@@ -59,6 +59,7 @@ export interface WMSettings {
   loginProfile?: LoginProfile;
   layout: 'card' | 'feed' | 'official' | 'compact';
   theme: 'linear' | 'brand';
+  maxMediaMB: number;
   outputDir: string;
   listWidth: number;
   llm: LLMSettings;
@@ -106,6 +107,7 @@ const DEFAULTS: WMSettings = {
   shelfAccounts: [],
   layout: 'card',
   theme: 'linear',
+  maxMediaMB: 50,
   outputDir: '微信读书公众号',
   listWidth: 300,
   llm: { ...LLM_DEFAULTS },
@@ -587,13 +589,21 @@ export default class WereadMpCatcher extends Plugin {
       await this.ensureFolder(assetDir);
       for (let i = 0; i < media.length; i++) {
         const m = media[i];
-        let url = m.url;
-        if (m.type === 'video') url = await client.resolveVideo(url);
+        let url = m.direct || m.url;
+        if (!m.direct && m.type === 'video') url = await client.resolveVideo(url);
         const direct = /\.(mp4|m3u8|mp3|m4a|aac|wav)(\?|$)/i.test(url);
         let saved = false;
         if (this.settings.downloadImages && direct) {
           try {
             const buf = await client.fetchMedia(url);
+            const mb = buf.byteLength / 1048576;
+            if (mb > this.settings.maxMediaMB) {
+              new Notice(
+                `${m.type === 'video' ? '视频' : '音频'} ${mb.toFixed(0)}MB 超过上限 ${this.settings.maxMediaMB}MB，改为保留原链接`,
+                7000,
+              );
+              throw new Error('oversize');
+            }
             const ext = m.type === 'video' ? 'mp4' : url.match(/\.(mp3|m4a|aac|wav)/i)?.[1] || 'mp3';
             const rel = normalizePath(`${assetDir}/media-${i + 1}.${ext}`);
             await this.app.vault.adapter.writeBinary(rel, buf);
@@ -758,16 +768,20 @@ export default class WereadMpCatcher extends Plugin {
   async activateView(): Promise<void> {
     const { workspace } = this.app;
     const leaves = workspace.getLeavesOfType(VIEW_TYPE_WMC);
-    // 复用已有视图，绝不 detach（detach 是异步的，会造成双 leaf 垂直 split）
-    if (leaves.length) {
-      const leaf = leaves[0];
-      await leaf.setViewState({ type: VIEW_TYPE_WMC, active: true });
-      const v = leaf.view as unknown as { render?: () => void };
+    // 优先复用主区域的视图；侧栏里的（历史遗留）一律关掉，避免"打开却出现在右边"
+    const inMain = leaves.find((l) => l.getRoot() === workspace.rootSplit);
+    if (inMain) {
+      leaves.forEach((l) => {
+        if (l !== inMain) l.detach();
+      });
+      const v = inMain.view as unknown as { render?: () => void };
       v?.render?.();
-      workspace.revealLeaf(leaf);
+      workspace.revealLeaf(inMain);
       return;
     }
-    const leaf = workspace.getRightLeaf(false) ?? workspace.getLeaf('tab');
+    leaves.forEach((l) => l.detach());
+    // 主标签页打开（对齐 qiaomu-home 的观感），不用右侧插件栏
+    const leaf = workspace.getLeaf('tab');
     await leaf.setViewState({ type: VIEW_TYPE_WMC, active: true });
     workspace.revealLeaf(leaf);
   }

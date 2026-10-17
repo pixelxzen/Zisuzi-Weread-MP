@@ -84,6 +84,12 @@ export class WmcView extends ItemView {
   }
 
   async onOpen(): Promise<void> {
+    // 清掉 leaf 容器里由 setViewState 重建实例遗留的旧 .wmc-root（否则 DOM 叠加成多面板）
+    const host = this.containerEl?.parentElement;
+    host?.querySelectorAll('.wmc-root').forEach((el) => {
+      if (el !== this.contentEl) el.remove();
+    });
+    this.contentEl.empty();
     this.contentEl.addClass('wmc-root');
     this.applyTheme();
     this.render();

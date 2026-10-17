@@ -12,6 +12,8 @@ export interface MediaRef {
   type: 'audio' | 'video';
   url: string;
   name?: string;
+  /** 从正文 HTML 直接抽到的签名直链（mp4/mp3），优先于 url */
+  direct?: string;
 }
 
 export interface ConvertResult {
@@ -85,6 +87,52 @@ function inlineToMd(s: string): string {
   return decodeEntities(t);
 }
 
+/** 微信 HTML 的多层转义（\x26amp; / &amp; / \x22） */
+function unescapeWechat(s: string): string {
+  return s
+    .replace(/\\x26amp;/g, '&')
+    .replace(/\\x26/g, '&')
+    .replace(/&amp;/g, '&')
+    .replace(/\\x22/g, '"')
+    .replace(/\\x3c/gi, '<')
+    .replace(/\\x3e/gi, '>')
+    .replace(/\\\//g, '/');
+}
+
+/**
+ * 从正文 HTML 的 JS 数据块抽「vid → 最大码率 mp4 直链」。
+ * 实测 2026-10：每视频 4 档码率（f10002/f10004/f10102…），取 filesize 最大者；
+ * 直链带 dis_t 签名，抓取时必须立即下载，过期失效。
+ */
+export function extractVideoUrls(html: string): Map<string, string> {
+  const s = unescapeWechat(html);
+  const vids: Array<{ vid: string; idx: number }> = [];
+  const vr = /(wxv_\d+)/g;
+  let m: RegExpExecArray | null;
+  while ((m = vr.exec(s))) vids.push({ vid: m[1], idx: m.index });
+  if (!vids.length) return new Map();
+
+  const best = new Map<string, { size: number; url: string }>();
+  const ur = /filesize:\s*'(\d+)'[\s\S]{0,400}?url:\s*'([^']*\.mp4[^']*)'/g;
+  while ((m = ur.exec(s))) {
+    const size = Number(m[1]);
+    const url = m[2];
+    if (!/^https?:/.test(url)) continue;
+    let owner: string | undefined;
+    for (const v of vids) {
+      if (v.idx < m.index) owner = v.vid;
+      else break;
+    }
+    if (!owner) continue;
+    const cur = best.get(owner);
+    if (!cur || size > cur.size) best.set(owner, { size, url });
+  }
+
+  const out = new Map<string, string>();
+  for (const [vid, v] of best) out.set(vid, v.url);
+  return out;
+}
+
 export function htmlToMarkdown(html: string): ConvertResult {
   const body = extractById(stripJunk(html));
   if (!body) return { markdown: '', images: [], media: [] };
@@ -124,7 +172,8 @@ export function htmlToMarkdown(html: string): ConvertResult {
     return `\n\n@@MEDIA${idx}@@\n\n`;
   });
 
-  // 视频：<video src> 与微信播放器 iframe
+  // 视频：<video src> 与微信播放器 iframe（优先用正文里的签名 mp4 直链）
+  const videoMap = extractVideoUrls(html);
   text = text.replace(/<video\b[\s\S]*?<\/video>/gi, (block) => {
     const src = /\bsrc=["']([^"']+)["']/i.exec(block);
     if (!src) return '';
@@ -132,9 +181,13 @@ export function htmlToMarkdown(html: string): ConvertResult {
     return `\n\n@@MEDIA${idx}@@\n\n`;
   });
   text = text.replace(/<iframe\b[^>]*>/gi, (tag) => {
-    const src = /\bdata-src=["']([^"']+)["']/i.exec(tag) || /\bsrc=["']([^"']+)["']/i.exec(tag);
-    if (!src) return '';
-    const idx = media.push({ type: 'video', url: src[1] }) - 1;
+    const src = /data-src=["']([^"']+)["']/i.exec(tag) || /src=["']([^"']+)["']/i.exec(tag);
+    const vid = /data-mpvid=["']([^"']+)["']/i.exec(tag)?.[1] || /[?&]vid=([A-Za-z0-9_-]+)/.exec(tag)?.[1];
+    if (!src && !vid) return '';
+    const url = src
+      ? decodeEntities(src[1])
+      : `https://mp.weixin.qq.com/mp/readtemplate?t=pages/video_player_tmpl&action=mpvideo&vid=${vid}`;
+    const idx = media.push({ type: 'video', url, name: vid, direct: vid ? videoMap.get(vid) : undefined }) - 1;
     return `\n\n@@MEDIA${idx}@@\n\n`;
   });
 
