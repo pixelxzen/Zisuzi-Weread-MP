@@ -95,12 +95,122 @@ export async function fetchProfile(http: HttpFn, cookie: string): Promise<Weread
   }
 }
 
+/**
+ * 风控码 → 人话。
+ * 实测（2026-10-17）：同一份 cookie 上 /web/user 与 /api/skills/apikeyGet 都正常、
+ * 只有 /web/mp/articles 返回 -2041，且官方网页版打开公众号时页面自己也报 -2041 →
+ * -2041 不是"登录失效"，是"公众号接口对该账号关闭/限流"。别再把两者混为一谈。
+ */
+export function describeRisk(code: number, what = ''): string {
+  const pre = what ? `${what}：` : '';
+  switch (code) {
+    case -2010:
+      return `${pre}未登录（cookie 缺失或已失效）(-2010)`;
+    case -2012:
+      return `${pre}登录态过期，需重新扫码 (-2012)`;
+    case -2041:
+      return `${pre}公众号接口对该账号受限 (-2041)：登录态本身有效，可在手机 App 打开一次公众号解除，或等数小时冷却`;
+    default:
+      return `${pre}接口错误 ${code}`;
+  }
+}
+
 function assertNoRisk(json: any, what: string): void {
   const code = json?.errcode ?? json?.errCode;
   if (typeof code === 'number' && code !== 0) {
-    if (RISK_CODES.includes(code)) throw new RiskError(code, `${what} 风控/登录失效 (${code})`);
+    if (RISK_CODES.includes(code)) throw new RiskError(code, describeRisk(code, what));
     throw new Error(`${what} 接口错误 ${code}: ${json?.errmsg ?? json?.errMsg ?? ''}`);
   }
+}
+
+export interface AccessProbe {
+  cookieOk: boolean;
+  missing: string[];
+  account: string | null;
+  listOk: boolean;
+  listCode: number;
+  verdict: 'ok' | 'no-cookie' | 'expired' | 'restricted' | 'unknown';
+  hint: string;
+}
+
+/**
+ * 接口自检：把"cookie 少字段 / 会话过期 / 公众号接口被限"三种情况分开，
+ * 不再一律报"登录失效"。
+ * @param bookId 探测用公众号，默认 'mpbook'（文章收藏），任何号返回码都一致
+ */
+export async function probeAccess(http: HttpFn, cookie: string, bookId = 'mpbook'): Promise<AccessProbe> {
+  const norm = normalizeCookie(cookie || '');
+  const chk = checkCookie(norm);
+  const out: AccessProbe = {
+    cookieOk: chk.ok,
+    missing: chk.missing,
+    account: null,
+    listOk: false,
+    listCode: 0,
+    verdict: 'unknown',
+    hint: '',
+  };
+  if (!norm) {
+    out.verdict = 'no-cookie';
+    out.hint = '还没登录：先在设置里扫码登录，或粘贴四项 Cookie';
+    return out;
+  }
+  if (!chk.ok) {
+    out.verdict = 'expired';
+    out.hint = `Cookie 缺 ${chk.missing.join(', ')}（缺 wr_gid 会稳定报 -2012）`;
+  }
+
+  // ① 会话是否还活着（只看 /web/user，不看 mp 接口）
+  const prof = await fetchProfile(http, norm).catch(() => null);
+  out.account = prof?.name || null;
+
+  // ② 公众号列表接口
+  try {
+    const r = await http(
+      `https://weread.qq.com/web/mp/articles?bookId=${encodeURIComponent(bookId)}&offset=0`,
+      baseHeaders(norm),
+    );
+    let code = 0;
+    if (r.status === 0) {
+      code = -9001; // 超时/无响应，不能当成 0（0 会被误判成"可以抓"）
+    } else if (r.status !== 200) {
+      code = -r.status;
+    } else {
+      try {
+        const j: any = JSON.parse(r.text);
+        code = typeof j?.errCode === 'number' ? j.errCode : typeof j?.errcode === 'number' ? j.errcode : 0;
+      } catch {
+        code = -2;
+      }
+    }
+    out.listCode = code;
+    out.listOk = code === 0;
+  } catch {
+    out.listCode = -1;
+  }
+
+  if (out.listOk) {
+    out.verdict = 'ok';
+    out.hint = '登录态与公众号接口都正常，可以抓';
+    return out;
+  }
+  if (!out.account) {
+    out.verdict = 'expired';
+    out.hint = '登录态已失效，重新扫码即可';
+    return out;
+  }
+  if (out.listCode === -2041) {
+    out.verdict = 'restricted';
+    out.hint = '登录态有效（能看到账号昵称），但公众号接口对该账号受限：手机 App 打开一次公众号，或等数小时冷却；换账号也能绕开';
+    return out;
+  }
+  if (out.listCode === -2010 || out.listCode === -2012) {
+    out.verdict = 'expired';
+    out.hint = `会话过期 (${out.listCode})，重新扫码`;
+    return out;
+  }
+  out.hint = `列表接口返回 ${out.listCode}，未知错误，先看 errLog`;
+  return out;
 }
 
 /** 解析一页列表响应 */
@@ -136,6 +246,7 @@ export class WereadClient {
   async listArticles(bookId: string, offset = 0): Promise<ArticleItem[]> {
     const url = `https://weread.qq.com/web/mp/articles?bookId=${encodeURIComponent(bookId)}&offset=${offset}`;
     const r = await this.http(url, this.headers());
+    if (r.status === 0) throw new Error('列表 请求超时/无响应（20s）');
     if (r.status !== 200) throw new Error(`列表 HTTP ${r.status}`);
     let json: any;
     try {

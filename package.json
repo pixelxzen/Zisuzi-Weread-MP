@@ -1,6 +1,6 @@
 {
   "name": "weread-mp-catcher",
-  "version": "1.2.0",
+  "version": "2.0.0",
   "description": "微信读书公众号盯采：登录后自动抓取书架公众号更新，归档为 Obsidian 笔记。",
   "main": "main.js",
   "type": "module",

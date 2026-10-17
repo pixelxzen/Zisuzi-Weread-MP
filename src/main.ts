@@ -15,6 +15,7 @@ import {
   checkCookie,
   normalizeCookie,
   fetchProfile,
+  probeAccess,
   type ArticleItem,
   type HttpFn,
   RiskError,
@@ -99,6 +100,7 @@ interface WMState {
   discovered?: Record<string, DiscoveredEntry>;
   read?: Record<string, number>;
   summaries?: Record<string, string>;
+  accountOffsets?: Record<string, number>;
   llmQuota?: { day: string; count: number };
   lastRun?: { at: number; found: number; written: number; skipped: number; error?: string };
   watchSince?: number;
@@ -276,7 +278,7 @@ export default class WereadMpCatcher extends Plugin {
    * 原因：Obsidian requestUrl 会把 defaultSession 里残留的 weread 旧 cookie 和手动 Cookie
    * 头一起发出，服务端读到旧的就报 -2012。独立 partition 保证只发我们给的那份。
    */
-  private http: HttpFn = async (url: string, headers: Record<string, string>) => {
+  private httpRaw: HttpFn = async (url: string, headers: Record<string, string>) => {
     try {
       // eslint-disable-next-line @typescript-eslint/no-var-requires
       const electron: any = (window as any).require?.('electron');
@@ -327,6 +329,32 @@ export default class WereadMpCatcher extends Plugin {
     }
     const r = await requestUrl({ url, method: 'GET', headers, throw: false });
     return { status: r.status, text: r.text, bytes: r.arrayBuffer };
+  };
+
+  /**
+   * 带超时的 HTTP：Electron net 在没有响应时会一直挂着（实测 2026-10-17：
+   * 列表请求挂死 → `running` 永久为 true → 之后每一轮都被"上一轮还在跑"挡掉，
+   * 盯采看起来在跑其实一条都没抓）。这里统一 20s 超时，超时返回 status 0，
+   * 上层当成普通失败跳过，不再堵死队列。
+   */
+  private http: HttpFn = async (url: string, headers: Record<string, string>) => {
+    const TIMEOUT_MS = 20000;
+    let timer: number | undefined;
+    try {
+      return await Promise.race([
+        this.httpRaw(url, headers),
+        new Promise<{ status: number; text: string; bytes: ArrayBuffer }>((resolve) => {
+          timer = window.setTimeout(
+            () => resolve({ status: 0, text: '', bytes: new ArrayBuffer(0) }),
+            TIMEOUT_MS,
+          );
+        }),
+      ]);
+    } catch {
+      return { status: 0, text: '', bytes: new ArrayBuffer(0) };
+    } finally {
+      if (timer !== undefined) window.clearTimeout(timer);
+    }
   };
 
   async onload() {
@@ -385,6 +413,36 @@ export default class WereadMpCatcher extends Plugin {
           v?.applyTheme?.();
           v?.render?.();
         }
+      },
+    });
+    this.addCommand({
+      id: 'selftest',
+      name: '诊断：登录态 + 公众号接口（分清过期/被限）',
+      callback: async () => {
+        const ck = normalizeCookie(this.settings.cookie || '');
+        const probe = await probeAccess(this.http, ck);
+        const tag =
+          probe.verdict === 'ok'
+            ? '正常'
+            : probe.verdict === 'restricted'
+              ? '被限（-2041）'
+              : probe.verdict === 'expired'
+                ? '过期'
+                : probe.verdict === 'no-cookie'
+                  ? '未登录'
+                  : '未知';
+        this.pushLog(
+          `自检：${tag}｜账号=${probe.account ?? '读不到'}｜列表码=${probe.listCode}｜${probe.hint}`,
+          probe.verdict === 'ok' ? 'ok' : 'err',
+        );
+        for (const leaf of this.app.workspace.getLeavesOfType(VIEW_TYPE_WMC)) {
+          const v = leaf.view as unknown as { render?: () => void };
+          v?.render?.();
+        }
+        new Notice(
+          `自检结果：${tag}\n账号：${probe.account ?? '读不到'}\n列表接口：${probe.listCode}\n${probe.hint}`,
+          12000,
+        );
       },
     });
     this.addCommand({
@@ -708,8 +766,11 @@ export default class WereadMpCatcher extends Plugin {
 
   /* ------------------------------ 扫码登录 ------------------------------ */
 
-  /** 选中某个号但视图里没有它的文章时，单号轻量拉列表（不抓正文） */
-  async fetchAccountList(name: string): Promise<number> {
+  /**
+   * 加载某个号的文章列表。reset=true 从第一页开始（首屏秒开 20 条），
+   * 之后由 loadMoreForAccount 增量续拉（对齐网页版的滚动加载体验）。
+   */
+  async fetchAccountList(name: string, reset = true): Promise<number> {
     const acc =
       this.settings.accounts.find((a) => a.name === name) ||
       this.settings.shelfAccounts.find((a) => a.name === name);
@@ -717,12 +778,11 @@ export default class WereadMpCatcher extends Plugin {
     const cookie = normalizeCookie(this.settings.cookie || '');
     if (!checkCookie(cookie).ok) return 0;
     const client = new WereadClient(this.http, cookie);
+    if (!this.state.discovered) this.state.discovered = {};
+    if (!this.state.accountOffsets) this.state.accountOffsets = {};
+    const offset = reset ? 0 : this.state.accountOffsets[acc.name] || 0;
     try {
-      const t = new Notice(`正在加载「${name}」的全部文章…`, 0);
-      // 200 页 = 最多 4000 篇；listArticlesPages 遇到重复页会自动停，等于翻到底
-      const items = await client.listArticlesPages(acc.bookId, 200);
-      t.hide();
-      if (!this.state.discovered) this.state.discovered = {};
+      const items = await client.listArticles(acc.bookId, offset);
       let added = 0;
       for (const it of items) {
         if (!this.state.discovered[it.reviewId]) {
@@ -737,14 +797,23 @@ export default class WereadMpCatcher extends Plugin {
           added++;
         }
       }
-      if (added) await this.saveAll();
+      this.state.accountOffsets[acc.name] = offset + items.length;
+      if (added || reset) await this.saveAll();
       this.notifyViews();
-      new Notice(`「${name}」共 ${items.length} 篇，新增 ${added} 篇到列表`, 6000);
+      if (reset && added) new Notice(`「${name}」首批 ${items.length} 篇已就绪，往下滚继续加载`, 5000);
       return items.length;
     } catch (e) {
       new Notice(`加载「${name}」失败：${e instanceof Error ? e.message : String(e)}`, 6000);
       return 0;
     }
+  }
+
+  /** 滚到底时续拉下一页（20 条一页，与网页版一致） */
+  async loadMoreForAccount(name: string): Promise<{ added: number; hasMore: boolean }> {
+    const before = Object.keys(this.state.discovered || {}).length;
+    const got = await this.fetchAccountList(name, false);
+    const after = Object.keys(this.state.discovered || {}).length;
+    return { added: after - before, hasMore: got >= 20 };
   }
 
   /** 登出：清本地登录态 + 清 Electron session 里 weread 域 cookie（不清的话重扫码还是旧账号） */

@@ -76,6 +76,9 @@ export class WmcView extends ItemView {
   private agentOut = '';
   private agentBusy = false;
   private selectedIds = new Set<string>();
+  private loadingMore = false;
+  private accountExhausted = false;
+  private scrollMemory = 0;
 
   private get panelOpen(): boolean {
     return !!this.plugin.settings.panelOpen;
@@ -600,6 +603,13 @@ export class WmcView extends ItemView {
     }
 
     const scroller = root.createDiv('wmc-scroll');
+    scroller.scrollTop = this.scrollMemory;
+    scroller.addEventListener('scroll', () => {
+      this.scrollMemory = scroller.scrollTop;
+      if (!this.account || this.loadingMore || this.accountExhausted) return;
+      if (scroller.scrollTop + scroller.clientHeight < scroller.scrollHeight - 240) return;
+      void this.loadMore();
+    });
     const groups = new Map<string, RowItem[]>();
     for (const r of rows) {
       const g = dayGroup(r.time);
@@ -628,6 +638,12 @@ export class WmcView extends ItemView {
       step();
     }
     void this.fillSummaries(rows);
+    // 底部：滚动加载提示
+    if (this.account) {
+      scroller
+        .createDiv('wmc-loadmore')
+        .setText(this.accountExhausted ? '已经到底了' : '往下滚，自动加载更早的文章');
+    }
     // 搜索框正在打字时，empty+重建会失焦 → 恢复焦点到末尾
     if (this.query) {
       const inp = root.querySelector<HTMLInputElement>('.wmc-searchbox input');
@@ -778,6 +794,21 @@ export class WmcView extends ItemView {
       this.updatePickBar();
     });
     return el;
+  }
+
+  private async loadMore(): Promise<void> {
+    if (!this.account || this.loadingMore || this.accountExhausted) return;
+    this.loadingMore = true;
+    const foot = this.contentEl.querySelector('.wmc-loadmore');
+    foot?.setText('加载更多…');
+    try {
+      const r = await this.plugin.loadMoreForAccount(this.account);
+      if (r.added === 0 && !r.hasMore) this.accountExhausted = true;
+    } catch {
+      foot?.setText('加载失败，往下滚再试');
+    }
+    this.loadingMore = false;
+    if (this.mode === 'list') this.renderList();
   }
 
   private updatePickBar(): void {

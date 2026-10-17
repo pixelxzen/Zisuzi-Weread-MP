@@ -32,7 +32,8 @@ test('htmlToMarkdown 提取 data-src 图片并生成占位', () => {
 
 test('replaceImagePlaceholders 填本地路径，缺路径则丢弃', () => {
   const out = md.replaceImagePlaceholders('a @@IMG0@@ b @@IMG1@@ c', ['../assets/x/img-1.png']);
-  assert.ok(out.includes('![](../assets/x/img-1.png)'));
+  // v1.0.1 起图片路径用尖括号包裹（中文/空格文件名不再需要 %20 转义）
+  assert.ok(out.includes('![](<../assets/x/img-1.png>)'));
   assert.ok(!out.includes('@@IMG1@@'));
 });
 
