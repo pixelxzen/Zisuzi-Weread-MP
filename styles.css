@@ -2653,6 +2653,26 @@
   color: var(--text-muted);
 }
 
+
+/* 登录卡：网页登录态单行（与官方 Key 分开显示） */
+.wmc-login-web {
+  margin-top: 3px;
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.wmc-login-web.is-ok {
+  color: #4fd6a0;
+}
+
+.wmc-login-web.is-bad {
+  color: #ff8b8b;
+}
+
+.wmc-login-web.is-unknown {
+  color: var(--text-faint);
+}
+
 /* ---------------------------------- menu --------------------------------- */
 
 .wmc-menu {

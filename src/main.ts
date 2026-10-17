@@ -69,6 +69,10 @@ export interface WMSettings {
   agentDocked: boolean;
   /** true = 用 Obsidian 自带 session 的登录态（不手动传 Cookie） */
   useSession?: boolean;
+  /** 最近一次实测的网页登录态（列表/正文用），undefined = 没测过 */
+  webLoginOk?: boolean;
+  webLoginAt?: number;
+  webLoginMsg?: string;
   outputDir: string;
   listWidth: number;
   llm: LLMSettings;
@@ -951,6 +955,37 @@ export default class WereadMpCatcher extends Plugin {
     }
   }
 
+  /** 实测「网页登录态」是否真的能用（cookie 字段齐全 ≠ 服务端认账） */
+  async checkWebLogin(): Promise<{ ok: boolean; msg: string }> {
+    const acc = this.settings.accounts[0] || this.settings.shelfAccounts[0];
+    if (!acc?.bookId) return { ok: false, msg: '还没有可测的公众号' };
+    try {
+      const client = new WereadClient(this.http, normalizeCookie(this.settings.cookie || ''));
+      const items = await client.listArticles(acc.bookId, 0);
+      const ok = items.length > 0;
+      this.settings.webLoginOk = ok;
+      this.settings.webLoginAt = Date.now();
+      this.settings.webLoginMsg = ok ? `列表正常（${items.length} 条）` : '列表返回空';
+      await this.saveAll();
+      return { ok, msg: this.settings.webLoginMsg };
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      this.settings.webLoginOk = false;
+      this.settings.webLoginAt = Date.now();
+      this.settings.webLoginMsg = msg;
+      await this.saveAll();
+      return { ok: false, msg };
+    }
+  }
+
+  /** 网页登录态的一行摘要（给设置页/状态条用） */
+  webLoginSummary(): string {
+    if (this.settings.webLoginOk === undefined) return '未检测';
+    const mins = this.settings.webLoginAt ? Math.round((Date.now() - this.settings.webLoginAt) / 60000) : 0;
+    if (this.settings.webLoginOk) return `正常（${mins} 分钟前检测）`;
+    return `已失效：${(this.settings.webLoginMsg || '').slice(0, 40)}`;
+  }
+
   /** 是否具备可用登录态：session 模式，或手动 Cookie 完整 */
   hasLogin(): boolean {
     if (this.settings.useSession) return true;
@@ -1690,6 +1725,10 @@ export default class WereadMpCatcher extends Plugin {
   /** 用当前 cookie 探测书架号数（设置页「测试连接」用） */
   async testConnection(): Promise<string> {
     const cookie = normalizeCookie(this.settings.cookie || '');
+    const web = await this.checkWebLogin();
+    if (!web.ok) {
+      return `列表不通：${web.msg}｜官方 Key 仍有效（书架可读）。修法：点「重新扫码」，在**插件弹窗**里扫码（Chrome 里的登录态插件读不到）。`;
+    }
     const chk = checkCookie(cookie);
     if (!chk.ok) return `Cookie 不完整，缺 ${chk.missing.join(', ')}`;
     const accounts = this.settings.accounts.filter((a) => a.bookId?.startsWith('MP_WXS_'));
@@ -1872,20 +1911,27 @@ class WMSettingTab extends PluginSettingTab {
       cls: 'wmc-login-title',
       text: prof?.name || (st === 'full' ? '已登录' : st === 'cookie' ? '登录不完整' : '未登录'),
     });
-    txt.createDiv({
-      cls: 'wmc-login-sub',
-      text:
-        st === 'none'
-          ? '扫码即可，不需要复制任何 Cookie'
-          : [
-              prof?.vid ? `VID ${prof.vid}` : '',
-              st === 'full' ? '官方 Key 有效' : '登录态不完整',
-              `书架 ${this.plugin.settings.shelfAccounts.length || this.plugin.settings.accounts.length} 个 · 已选 ${this.plugin.settings.accounts.length}`,
-              prof?.desc || '',
-            ]
-              .filter(Boolean)
-              .join(' · '),
-    });
+    if (st === 'none') {
+      txt.createDiv({ cls: 'wmc-login-sub', text: '扫码即可，不需要复制任何 Cookie' });
+    } else {
+      // 第一行：身份 + 官方 Key（长期有效，只决定书架能不能读）
+      txt.createDiv({
+        cls: 'wmc-login-sub',
+        text: [
+          prof?.vid ? `VID ${prof.vid}` : '',
+          st === 'full' ? '官方 Key 有效' : 'Key 缺失',
+          `书架 ${this.plugin.settings.shelfAccounts.length || this.plugin.settings.accounts.length} 个 · 已选 ${this.plugin.settings.accounts.length}`,
+        ]
+          .filter(Boolean)
+          .join(' · '),
+      });
+      // 第二行：网页登录态（短命，列表/正文全靠它）—— 这里才是 -2012 的来源
+      const webOk = this.plugin.settings.webLoginOk;
+      txt.createDiv({
+        cls: `wmc-login-web ${webOk === true ? 'is-ok' : webOk === false ? 'is-bad' : 'is-unknown'}`,
+        text: `网页登录态：${this.plugin.webLoginSummary()}`,
+      });
+    }
 
     // 有登录态但还没拉过资料时，异步补一次（不阻塞界面）
     if (!prof && st !== 'none') {
@@ -1922,7 +1968,7 @@ class WMSettingTab extends PluginSettingTab {
         }),
       )
       .addButton((b) =>
-        b.setButtonText('测试抓取').onClick(async () => {
+        b.setButtonText('测试列表').onClick(async () => {
           new Notice(await this.plugin.testConnection(), 8000);
         }),
       );
