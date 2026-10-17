@@ -1867,36 +1867,62 @@
 }
 
 
-/* ================= v3.2.0 归档弹窗（从零重构） ================= */
+/* ================= v3.3 归档弹窗（左标签右控件网格） ================= */
+
+.wmc-bf-modal {
+  padding: 0 !important;
+  border-radius: 12px;
+  overflow: hidden;
+}
 
 .wmc-bf {
   padding: 0 !important;
-  width: 620px;
-  max-width: 92vw;
+  overflow-x: hidden;
+  box-sizing: border-box;
+  font-size: 13px;
+}
+
+/* 所有子元素统一盒模型，杜绝横向溢出 */
+.wmc-bf *,
+.wmc-bf *::before,
+.wmc-bf *::after {
+  box-sizing: border-box;
+}
+
+/* 剥离 Obsidian 主题对原生控件的样式压制 */
+.wmc-bf input,
+.wmc-bf select,
+.wmc-bf button {
+  margin: 0;
+  font-family: inherit;
+  font-size: 12.5px;
+  line-height: 1.2;
+  text-shadow: none;
+  box-shadow: none;
 }
 
 /* 头部 */
 .wmc-bf-head {
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   gap: 10px;
-  padding: 18px 18px 14px;
+  padding: 16px 18px 14px;
   border-bottom: 1px solid var(--wmc-line);
 }
 
 .wmc-bf-mark {
-  flex: 0 0 30px;
-  height: 30px;
+  flex: 0 0 28px;
+  height: 28px;
   display: grid;
   place-items: center;
-  border-radius: var(--wmc-r-sm);
+  border-radius: 8px;
   background: var(--wmc-brand-soft);
   color: var(--wmc-brand);
 }
 
 .wmc-bf-mark .svg-icon {
-  width: 16px;
-  height: 16px;
+  width: 15px;
+  height: 15px;
 }
 
 .wmc-bf-head-txt {
@@ -1905,174 +1931,265 @@
 }
 
 .wmc-bf-h1 {
-  font-size: 14px;
+  font-size: 13.5px;
   font-weight: 600;
   letter-spacing: -0.01em;
   color: var(--wmc-ink-1);
 }
 
 .wmc-bf-h2 {
-  margin-top: 2px;
-  font-size: 11.5px;
+  margin-top: 1px;
+  font-size: 11px;
   color: var(--wmc-ink-4);
 }
 
 .wmc-bf-x {
   flex: 0 0 auto;
-  width: 24px;
-  height: 24px;
+  width: 26px !important;
+  height: 26px !important;
   display: grid;
   place-items: center;
-  border: 0;
-  border-radius: var(--wmc-r-xs);
-  background: transparent;
+  padding: 0 !important;
+  border: 0 !important;
+  border-radius: 6px;
+  background: transparent !important;
+  box-shadow: none !important;
   color: var(--wmc-ink-4);
-  box-shadow: none;
   cursor: pointer;
+  transition: background var(--wmc-120) var(--wmc-ease), color var(--wmc-120) var(--wmc-ease);
 }
 
 .wmc-bf-x:hover {
-  background: var(--wmc-hover);
+  background: var(--wmc-hover) !important;
   color: var(--wmc-ink-2);
 }
 
-/* 表单 */
-.wmc-bf-form {
-  display: flex;
-  flex-direction: column;
-  gap: 11px;
-  padding: 14px 18px 12px;
+.wmc-bf-x .svg-icon {
+  width: 14px;
+  height: 14px;
 }
 
-.wmc-bf-field {
+/* --------------------- 表单：左标签 / 右控件网格 --------------------- */
+.wmc-bf-form {
+  display: grid;
+  grid-template-columns: 74px minmax(0, 1fr);
+  align-items: start;
+  gap: 12px 14px;
+  padding: 16px 18px 4px;
+}
+
+.wmc-bf-key {
+  padding-top: 7px;
+  font-size: 11.5px;
+  color: var(--wmc-ink-4);
+  white-space: nowrap;
+}
+
+.wmc-bf-val {
   display: flex;
   flex-direction: column;
   gap: 5px;
-}
-
-.wmc-bf-label {
-  font-size: 10px;
-  font-weight: 600;
-  letter-spacing: 0.07em;
-  text-transform: uppercase;
-  color: var(--wmc-ink-4);
-}
-
-.wmc-bf-input,
-.wmc-bf-select {
-  width: 100%;
-  height: 30px;
-  padding: 0 9px;
-  border: 1px solid var(--wmc-line-2);
-  border-radius: var(--wmc-r-sm);
-  background: var(--wmc-inset);
-  color: var(--wmc-ink-1);
-  font-size: 12.5px;
-  box-shadow: none;
-}
-
-.wmc-bf-input:focus,
-.wmc-bf-select:focus {
-  outline: none;
-  border-color: var(--wmc-brand-line);
-  box-shadow: 0 0 0 3px var(--wmc-brand-soft);
-}
-
-.wmc-bf-two {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 10px;
+  min-width: 0;
 }
 
 .wmc-bf-hint {
   font-size: 10.5px;
+  line-height: 1.4;
   color: var(--wmc-ink-4);
 }
 
-/* 速度分段 */
+.wmc-bf-inline {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.wmc-bf-unit {
+  font-size: 11.5px;
+  color: var(--wmc-ink-4);
+}
+
+/* 输入框：剥离原生外观 */
+.wmc-bf-input {
+  width: 100%;
+  height: 30px !important;
+  padding: 0 9px !important;
+  border: 1px solid var(--wmc-line-2) !important;
+  border-radius: 7px;
+  background: var(--wmc-inset) !important;
+  color: var(--wmc-ink-1) !important;
+  font-size: 12.5px !important;
+  box-shadow: none !important;
+  appearance: none;
+  transition: border-color var(--wmc-120) var(--wmc-ease), box-shadow var(--wmc-120) var(--wmc-ease);
+}
+
+.wmc-bf-input:hover {
+  border-color: var(--wmc-line-3);
+}
+
+.wmc-bf-input:focus {
+  outline: none !important;
+  border-color: var(--wmc-brand-line) !important;
+  box-shadow: 0 0 0 3px var(--wmc-brand-soft) !important;
+}
+
+.wmc-bf-input.is-num {
+  width: 84px !important;
+  flex: 0 0 84px;
+  padding-right: 4px !important;
+  text-align: left;
+}
+
+/* 日期框：保留原生日历按钮，但统一高度与配色 */
+.wmc-bf input[type='date']::-webkit-calendar-picker-indicator {
+  opacity: 0.5;
+  cursor: pointer;
+}
+
+.wmc-bf input[type='date']::-webkit-calendar-picker-indicator:hover {
+  opacity: 0.85;
+}
+
+/* select：自绘箭头 */
+.wmc-bf-select-wrap {
+  position: relative;
+  min-width: 0;
+}
+
+.wmc-bf-select {
+  width: 100% !important;
+  height: 30px !important;
+  padding: 0 30px 0 9px !important;
+  border: 1px solid var(--wmc-line-2) !important;
+  border-radius: 7px;
+  background: var(--wmc-inset) !important;
+  color: var(--wmc-ink-1) !important;
+  font-size: 12.5px !important;
+  box-shadow: none !important;
+  appearance: none !important;
+  cursor: pointer;
+  transition: border-color var(--wmc-120) var(--wmc-ease), box-shadow var(--wmc-120) var(--wmc-ease);
+}
+
+.wmc-bf-select:hover {
+  border-color: var(--wmc-line-3);
+}
+
+.wmc-bf-select:focus {
+  outline: none !important;
+  border-color: var(--wmc-brand-line) !important;
+  box-shadow: 0 0 0 3px var(--wmc-brand-soft) !important;
+}
+
+.wmc-bf-chev {
+  position: absolute;
+  top: 50%;
+  right: 9px;
+  transform: translateY(-50%);
+  display: inline-flex;
+  color: var(--wmc-ink-4);
+  pointer-events: none;
+}
+
+.wmc-bf-chev .svg-icon {
+  width: 13px;
+  height: 13px;
+}
+
+/* 速度：iOS 式分段控件 */
 .wmc-bf-seg {
   display: grid;
   grid-template-columns: 1fr 1fr;
-  gap: 4px;
-  padding: 3px;
+  gap: 2px;
+  padding: 2px;
   border: 1px solid var(--wmc-line-2);
-  border-radius: var(--wmc-r-sm);
+  border-radius: 8px;
   background: var(--wmc-inset);
 }
 
 .wmc-bf-seg-btn {
   display: flex;
-  flex-direction: column;
-  gap: 1px;
-  padding: 5px 8px;
-  border: 0;
-  border-radius: 4px;
-  background: transparent;
-  text-align: left;
-  box-shadow: none;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  height: 26px !important;
+  padding: 0 8px !important;
+  border: 0 !important;
+  border-radius: 6px;
+  background: transparent !important;
+  box-shadow: none !important;
+  white-space: nowrap;
   cursor: pointer;
-  transition: background var(--wmc-120) var(--wmc-ease);
+  transition: background var(--wmc-120) var(--wmc-ease), color var(--wmc-120) var(--wmc-ease);
 }
 
 .wmc-bf-seg-btn:hover {
-  background: var(--wmc-hover);
+  background: var(--wmc-hover) !important;
 }
 
 .wmc-bf-seg-btn.is-on {
-  background: var(--wmc-brand-soft);
+  background: var(--wmc-raised) !important;
+  box-shadow: 0 1px 2px rgb(0 0 0 / 22%), 0 0 0 1px rgb(255 255 255 / 5%) !important;
 }
 
 .wmc-bf-seg-t {
   font-size: 12px;
   font-weight: 500;
-  color: var(--wmc-ink-2);
+  color: var(--wmc-ink-3);
 }
 
 .wmc-bf-seg-btn.is-on .wmc-bf-seg-t {
-  color: var(--wmc-brand-fg);
+  color: var(--wmc-ink-1);
 }
 
 .wmc-bf-seg-s {
   font-size: 10px;
   color: var(--wmc-ink-4);
+  font-variant-numeric: tabular-nums;
 }
 
 /* 风控提示 */
 .wmc-bf-warn {
-  margin: 0 18px 12px;
-  padding: 7px 10px;
-  border: 1px solid color-mix(in srgb, #f5a623 26%, transparent);
-  border-radius: var(--wmc-r-sm);
-  background: color-mix(in srgb, #f5a623 9%, transparent);
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+  margin: 12px 18px 0;
+  padding: 8px 10px;
+  border: 1px solid color-mix(in srgb, #f5a623 22%, transparent);
+  border-radius: 7px;
+  background: color-mix(in srgb, #f5a623 8%, transparent);
   font-size: 11px;
-  line-height: 1.55;
+  line-height: 1.5;
   color: var(--wmc-ink-3);
+}
+
+.wmc-bf-warn-ico {
+  flex: 0 0 12px;
+  display: inline-flex;
+  margin-top: 1px;
+  color: #d08b1a;
+}
+
+.wmc-bf-warn-ico .svg-icon {
+  width: 12px;
+  height: 12px;
 }
 
 /* 进度 */
 .wmc-bf-prog {
-  padding: 0 18px 12px;
-}
-
-.wmc-bf-prog-note {
-  margin-bottom: 8px;
-  font-size: 11.5px;
-  color: var(--wmc-ink-3);
-}
-
-.wmc-bf-prog-note.is-bad {
-  color: #e05252;
+  padding: 14px 18px 0;
 }
 
 .wmc-bf-prog-top {
   display: flex;
   align-items: baseline;
   gap: 10px;
-  margin-bottom: 6px;
+  margin-bottom: 7px;
 }
 
 .wmc-bf-pct {
-  font-size: 20px;
+  font-size: 19px;
   font-weight: 600;
   letter-spacing: -0.02em;
   color: var(--wmc-ink-1);
@@ -2084,21 +2201,27 @@
   display: flex;
   align-items: baseline;
   justify-content: space-between;
+  min-width: 0;
 }
 
 .wmc-bf-prog-main {
-  font-size: 12px;
-  color: var(--wmc-ink-2);
+  overflow: hidden;
+  font-size: 11.5px;
+  color: var(--wmc-ink-3);
+  text-overflow: ellipsis;
+  white-space: nowrap;
   font-variant-numeric: tabular-nums;
 }
 
 .wmc-bf-prog-eta {
+  flex: 0 0 auto;
   font-size: 10.5px;
   color: var(--wmc-ink-4);
+  font-variant-numeric: tabular-nums;
 }
 
 .wmc-bf-bar {
-  height: 4px;
+  height: 3px;
   overflow: hidden;
   border-radius: 999px;
   background: var(--wmc-inset);
@@ -2116,21 +2239,22 @@
 }
 
 .wmc-bf-bar-fill.is-indet {
-  width: 32% !important;
-  animation: wmc-indet 1.2s ease-in-out infinite;
+  width: 30% !important;
+  animation: wmc-indet 1.15s ease-in-out infinite;
 }
 
 @keyframes wmc-indet {
   0% {
-    transform: translateX(-110%);
+    transform: translateX(-105%);
   }
   100% {
-    transform: translateX(330%);
+    transform: translateX(340%);
   }
 }
 
 .wmc-bf-chips {
   display: flex;
+  flex-wrap: wrap;
   gap: 6px;
   margin-top: 8px;
 }
@@ -2139,7 +2263,7 @@
   display: inline-flex;
   align-items: center;
   gap: 4px;
-  height: 20px;
+  height: 19px;
   padding: 0 7px;
   border-radius: 999px;
   font-size: 10.5px;
@@ -2148,7 +2272,7 @@
 }
 
 .wmc-bf-chip.is-ok {
-  background: color-mix(in srgb, #34c98e 14%, transparent);
+  background: color-mix(in srgb, #34c98e 13%, transparent);
   color: #2fae7c;
 }
 
@@ -2158,27 +2282,39 @@
 }
 
 .wmc-bf-chip.is-bad {
-  background: color-mix(in srgb, #f87171 15%, transparent);
+  background: color-mix(in srgb, #f87171 14%, transparent);
   color: #e05252;
 }
 
 .wmc-bf-chip-ico .svg-icon {
-  width: 11px;
-  height: 11px;
+  width: 10px;
+  height: 10px;
+}
+
+.wmc-bf-note {
+  margin-top: 8px;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--wmc-ink-3);
+}
+
+.wmc-bf-note.is-bad {
+  color: #e05252;
 }
 
 /* 逐篇列表 */
 .wmc-bf-list {
-  max-height: 290px;
+  max-height: 264px;
+  overflow-x: hidden;
   overflow-y: auto;
-  margin: 0 18px;
+  margin: 12px 18px 0;
   border: 1px solid var(--wmc-line);
-  border-radius: var(--wmc-r-md);
+  border-radius: 8px;
   background: var(--wmc-inset);
 }
 
 .wmc-bf-list-empty {
-  padding: 18px;
+  padding: 20px;
   font-size: 11.5px;
   color: var(--wmc-ink-4);
   text-align: center;
@@ -2188,9 +2324,9 @@
   display: flex;
   align-items: center;
   gap: 8px;
-  height: 29px;
+  height: 28px;
   padding: 0 10px;
-  border-bottom: 1px solid color-mix(in srgb, var(--wmc-line) 50%, transparent);
+  border-bottom: 1px solid color-mix(in srgb, var(--wmc-line) 45%, transparent);
 }
 
 .wmc-bf-row:last-child {
@@ -2202,14 +2338,14 @@
 }
 
 .wmc-bf-ico {
-  flex: 0 0 13px;
+  flex: 0 0 12px;
   display: inline-flex;
   color: var(--wmc-ink-4);
 }
 
 .wmc-bf-ico .svg-icon {
-  width: 12px;
-  height: 12px;
+  width: 11px;
+  height: 11px;
 }
 
 .wmc-bf-row.is-running {
@@ -2225,7 +2361,7 @@
 }
 
 .wmc-bf-row.is-failed {
-  background: color-mix(in srgb, #f87171 7%, transparent);
+  background: color-mix(in srgb, #f87171 6%, transparent);
 }
 
 .wmc-bf-row.is-failed .wmc-bf-ico {
@@ -2251,21 +2387,24 @@
 
 .wmc-bf-tag {
   flex: 0 0 auto;
+  max-width: 128px;
+  overflow: hidden;
   padding: 1px 6px;
   border-radius: 999px;
   background: var(--wmc-hover);
   font-size: 10px;
   color: var(--wmc-ink-4);
+  text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .wmc-bf-tag.is-done {
-  background: color-mix(in srgb, #34c98e 14%, transparent);
+  background: color-mix(in srgb, #34c98e 13%, transparent);
   color: #2fae7c;
 }
 
 .wmc-bf-tag.is-failed {
-  background: color-mix(in srgb, #f87171 15%, transparent);
+  background: color-mix(in srgb, #f87171 14%, transparent);
   color: #e05252;
 }
 
@@ -2288,44 +2427,54 @@
 .wmc-bf-foot {
   display: flex;
   justify-content: flex-end;
+  align-items: center;
   gap: 8px;
-  padding: 14px 18px 6px;
+  padding: 14px 18px 16px;
 }
 
 .wmc-bf-btn {
-  height: 30px;
-  padding: 0 14px;
-  border: 1px solid var(--wmc-line-2);
-  border-radius: var(--wmc-r-sm);
-  background: transparent;
-  font-size: 12.5px;
-  color: var(--wmc-ink-2);
-  box-shadow: none;
+  height: 30px !important;
+  padding: 0 14px !important;
+  border: 1px solid var(--wmc-line-2) !important;
+  border-radius: 7px;
+  background: transparent !important;
+  font-size: 12.5px !important;
+  font-weight: 500;
+  color: var(--wmc-ink-2) !important;
+  box-shadow: none !important;
   cursor: pointer;
-  transition: background var(--wmc-120) var(--wmc-ease);
+  transition: background var(--wmc-120) var(--wmc-ease), border-color var(--wmc-120) var(--wmc-ease);
 }
 
 .wmc-bf-btn:hover {
-  background: var(--wmc-hover);
+  background: var(--wmc-hover) !important;
 }
 
 .wmc-bf-btn.is-primary {
-  border-color: var(--wmc-brand);
-  background: var(--wmc-brand);
-  color: #fff;
+  border-color: var(--wmc-brand) !important;
+  background: var(--wmc-brand) !important;
+  color: #fff !important;
 }
 
 .wmc-bf-btn.is-primary:hover {
-  filter: brightness(1.08);
+  filter: brightness(1.1);
 }
 
 .wmc-bf-btn.is-warn {
-  border-color: color-mix(in srgb, #f87171 40%, transparent);
-  color: #e05252;
+  border-color: color-mix(in srgb, #f87171 38%, transparent) !important;
+  color: #e05252 !important;
 }
 
-@media (max-width: 620px) {
-  .wmc-bf-two,
+@media (max-width: 560px) {
+  .wmc-bf-form {
+    grid-template-columns: 1fr;
+    gap: 6px;
+  }
+
+  .wmc-bf-key {
+    padding-top: 2px;
+  }
+
   .wmc-bf-seg {
     grid-template-columns: 1fr;
   }
