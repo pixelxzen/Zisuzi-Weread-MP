@@ -596,7 +596,7 @@ export default class WereadMpCatcher extends Plugin {
   /** 尝试从 Obsidian(Electron) session 读取 weread cookie；不可用时返回 null */
   async tryReadSessionCookie(): Promise<string | null> {
     try {
-      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      // eslint-disable-next-line @typescript-eslint/no-var-requires -- 运行时按需加载 node/electron 模块，静态 import 会在移动端直接崩
       const electron: any = (window as any).require?.('electron');
       const remote = electron?.remote;
       const session = remote?.session?.defaultSession;
@@ -784,7 +784,7 @@ export default class WereadMpCatcher extends Plugin {
 
   /** 跑一遍本地 Agent CLI（流式回调）。默认 Hermes，可切 Claude Code / Codex / Kimi / Gemini / Cursor / 自定义 */
   async runAgent(prompt: string, onChunk?: (t: string) => void): Promise<{ code: number; out: string; err: string; cmd: string }> {
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    // eslint-disable-next-line @typescript-eslint/no-var-requires -- 运行时按需加载 node/electron 模块，静态 import 会在移动端直接崩
     const cp = (window as any).require?.('child_process');
     if (!cp?.spawn) throw new Error('当前环境不支持执行本地命令（仅桌面端可用）');
 
@@ -988,7 +988,7 @@ export default class WereadMpCatcher extends Plugin {
   /** 登出：清本地登录态 + 清 Electron session 里 weread 域 cookie（不清的话重扫码还是旧账号） */
   async logout(): Promise<void> {
     try {
-      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      // eslint-disable-next-line @typescript-eslint/no-var-requires -- 运行时按需加载 node/electron 模块，静态 import 会在移动端直接崩
       const electron: any = (window as any).require?.('electron');
       const session = electron?.remote?.session?.defaultSession;
       if (session?.clearStorageData) {
@@ -1246,7 +1246,7 @@ export default class WereadMpCatcher extends Plugin {
     // 2) Electron 能力探测
     out.push('\n[2] Electron 能力：');
     try {
-      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      // eslint-disable-next-line @typescript-eslint/no-var-requires -- 运行时按需加载 node/electron 模块，静态 import 会在移动端直接崩
       const req = (window as any).require;
       out.push(`    require 存在: ${!!req}`);
       const el = req?.('electron');
@@ -2108,7 +2108,7 @@ class WMSettingTab extends PluginSettingTab {
     containerEl.addClass('wmc-settings');
 
     /* 1. 登录 */
-    containerEl.createEl('h3', { text: '登录' });
+    containerEl.createDiv({ cls: 'wmc-settings-h', text: '登录' });
     const st = this.plugin.loginState();
     const card = containerEl.createDiv('wmc-login');
     const prof = this.plugin.settings.loginProfile;
@@ -2233,7 +2233,7 @@ class WMSettingTab extends PluginSettingTab {
       );
 
     /* 2. 公众号：搜索 + 勾选 */
-    containerEl.createEl('h3', { text: '本地 Agent' });
+    containerEl.createDiv({ cls: 'wmc-settings-h', text: '本地 Agent' });
     const agentPreset =
       AGENT_PRESETS.find((p) => p.id === this.plugin.settings.agent.preset) || AGENT_PRESETS[0];
     new Setting(containerEl)
@@ -2312,7 +2312,7 @@ class WMSettingTab extends PluginSettingTab {
         }),
       );
 
-    containerEl.createEl('h3', { text: '盯采公众号' });
+    containerEl.createDiv({ cls: 'wmc-settings-h', text: '盯采公众号' });
     this.renderPicker(containerEl);
 
     const adv2 = containerEl.createEl('details', { cls: 'wmc-adv' });
@@ -2345,7 +2345,7 @@ class WMSettingTab extends PluginSettingTab {
       );
 
     /* 3. 输出与节奏 */
-    containerEl.createEl('h3', { text: '输出' });
+    containerEl.createDiv({ cls: 'wmc-settings-h', text: '输出' });
     new Setting(containerEl)
       .setName('笔记目录')
       .setDesc('库内相对路径，图片落在 <目录>/assets/<标题>/')
@@ -2356,7 +2356,7 @@ class WMSettingTab extends PluginSettingTab {
         }),
       );
 
-    containerEl.createEl('h3', { text: '盯采节奏' });
+    containerEl.createDiv({ cls: 'wmc-settings-h', text: '盯采节奏' });
     new Setting(containerEl)
       .setName('轮询间隔（分钟）')
       .setDesc('下限 15 分钟；公众号发文是小时级，30 分钟即准实时')
@@ -2426,7 +2426,7 @@ class WMSettingTab extends PluginSettingTab {
       );
 
     /* 4. AI 模型 */
-    containerEl.createEl('h3', { text: 'AI 模型（可选）' });
+    containerEl.createDiv({ cls: 'wmc-settings-h', text: 'AI 模型（可选）' });
     const llm = this.plugin.settings.llm;
 
     new Setting(containerEl)
@@ -2528,7 +2528,7 @@ class WMSettingTab extends PluginSettingTab {
     );
 
     /* 5. 状态 */
-    containerEl.createEl('h3', { text: '状态' });
+    containerEl.createDiv({ cls: 'wmc-settings-h', text: '状态' });
     const last = this.plugin.state.lastRun;
     const statusBox = containerEl.createDiv('wmc-status');
     statusBox.createEl('p', {

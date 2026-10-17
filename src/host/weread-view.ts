@@ -74,7 +74,7 @@ export class WmcView extends ItemView {
     this.buildChannelPicker(bar);
 
     const spacer = bar.createDiv('wmc-spacer');
-    spacer.style.flex = '1';
+    spacer.setCssStyles({ flex: '1' });
 
     this.iconBtn(bar, 'search', '搜索', () => this.toggleSearch());
     this.iconBtn(bar, 'refresh-cw', '抓取一轮', () => void this.plugin.runOnce(true).then(() => this.renderList()));
@@ -89,7 +89,7 @@ export class WmcView extends ItemView {
 
     const body = root.createDiv('wmc-body');
     const listWrap = body.createDiv('wmc-listwrap');
-    listWrap.style.width = `${this.width}px`;
+    listWrap.setCssStyles({ width: `${this.width}px` });
     this.listEl = listWrap.createDiv('wmc-list');
 
     const resizer = body.createDiv('wmc-resizer');
@@ -164,10 +164,10 @@ export class WmcView extends ItemView {
     }
     const rect = anchor.getBoundingClientRect();
     const menu = document.body.createDiv('wmc-menu');
-    menu.style.position = 'fixed';
-    menu.style.left = `${rect.left}px`;
-    menu.style.top = `${rect.bottom + 4}px`;
-    menu.style.zIndex = '9999';
+    menu.setCssStyles({ position: 'fixed' });
+    menu.setCssStyles({ left: `${rect.left}px` });
+    menu.setCssStyles({ top: `${rect.bottom + 4}px` });
+    menu.setCssStyles({ zIndex: '9999' });
 
     const mkItem = (label: string, value: string) => {
       const it = menu.createDiv('wmc-menu-item');
@@ -207,7 +207,7 @@ export class WmcView extends ItemView {
     const startW = wrap.offsetWidth;
     const onMove = (e: MouseEvent) => {
       const w = Math.min(520, Math.max(220, startW + (e.clientX - startX)));
-      wrap.style.width = `${w}px`;
+      wrap.setCssStyles({ width: `${w}px` });
       this.width = w;
     };
     const onUp = () => {

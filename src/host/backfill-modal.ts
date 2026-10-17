@@ -57,7 +57,7 @@ export class BackfillModal extends Modal {
     contentEl.addClass('wmc-bf');
     // 宽度控制在 .modal 上（contentEl 只有 padding，改它会被内容撑破）
     this.modalEl.addClass('wmc-bf-modal');
-    this.modalEl.style.width = 'min(600px, 92vw)';
+    this.modalEl.setCssStyles({ width: 'min(600px, 92vw)' });
 
     /* ---------------------------------- 头部 --------------------------------- */
     const head = contentEl.createDiv('wmc-bf-head');
@@ -208,7 +208,7 @@ export class BackfillModal extends Modal {
     meta.createDiv({ cls: 'wmc-bf-prog-main', text: '等待开始' });
     const bar = el.createDiv('wmc-bf-bar');
     const f = bar.createDiv('wmc-bf-bar-fill');
-    f.style.width = '0%';
+    f.setCssStyles({ width: '0%' });
   }
 
   private async start(only?: string[]): Promise<void> {
@@ -309,7 +309,7 @@ export class BackfillModal extends Modal {
 
     const bar = el.createDiv('wmc-bf-bar');
     const fill = bar.createDiv('wmc-bf-bar-fill');
-    fill.style.width = `${Math.min(100, pct)}%`;
+    fill.setCssStyles({ width: `${Math.min(100, pct)}%` });
     if (failed) fill.addClass('is-bad');
 
     const chips = el.createDiv('wmc-bf-chips');

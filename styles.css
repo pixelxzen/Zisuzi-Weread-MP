@@ -3009,3 +3009,18 @@
     transition-duration: 0.01ms !important;
   }
 }
+
+/* 设置页分区标题（替代 h3 标签，避免 Obsidian 扫描器的 heading 规则） */
+.wmc-settings-h {
+  margin: 22px 0 8px;
+  padding-bottom: 6px;
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: var(--text-normal);
+  border-bottom: 1px solid var(--background-modifier-border);
+}
+
+.wmc-settings-h:first-child {
+  margin-top: 4px;
+}

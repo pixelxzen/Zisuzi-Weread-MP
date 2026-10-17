@@ -247,7 +247,7 @@ export class WmcView extends ItemView {
     const title = bar.createDiv('wmc-topbar-title');
     title.setText(this.mode === 'list' ? '微信读书公众号' : this.mode === 'stats' ? '盯采统计' : '文章');
 
-    bar.createDiv('wmc-spacer').style.flex = '1';
+    bar.createDiv('wmc-spacer').setCssStyles({ flex: '1' });
 
     // 勾选 → 只下载所选
     const pickBar = bar.createDiv('wmc-pickbar');
@@ -351,7 +351,7 @@ export class WmcView extends ItemView {
       this.renderList();
     });
 
-    bar.createDiv('wmc-spacer').style.flex = '1';
+    bar.createDiv('wmc-spacer').setCssStyles({ flex: '1' });
 
     const layouts: Layout[] = ['card', 'feed', 'official', 'compact'];
     for (const l of layouts) {
@@ -486,7 +486,7 @@ export class WmcView extends ItemView {
 
     dot.className = `wmc-watch-dot is-${mode === 'busy' ? 'busy' : mode === 'idle' ? 'idle' : mode === 'error' ? 'error' : 'off'}`;
     fill.className = `wmc-progress-fill is-${mode}`;
-    fill.style.width = `${Math.round(pct * 100)}%`;
+    fill.setCssStyles({ width: `${Math.round(pct * 100)}%` });
     text.setText(t);
   }
 
@@ -1376,7 +1376,7 @@ export class WmcView extends ItemView {
       const row = list.createDiv('wmc-stat-row');
       row.createSpan({ cls: 'wmc-stat-row-name', text: acc });
       const track = row.createDiv('wmc-stat-track');
-      track.createDiv('wmc-stat-fill').style.width = `${Math.round((n / max) * 100)}%`;
+      track.createDiv('wmc-stat-fill').setCssStyles({ width: `${Math.round((n / max) * 100)}%` });
       row.createSpan({ cls: 'wmc-stat-row-num', text: String(n) });
     }
     if (!top.length) list.createDiv({ cls: 'wmc-hint', text: '还没有数据，先抓一轮。' });

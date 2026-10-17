@@ -125,7 +125,7 @@ export class WmcView extends ItemView {
     }
     const ch = bar.createEl('button', { cls: 'wmc-channel', text: this.account || '全部公众号' });
     ch.addEventListener('click', () => this.openChannelMenu(ch));
-    bar.createDiv('wmc-spacer').style.flex = '1';
+    bar.createDiv('wmc-spacer').setCssStyles({ flex: '1' });
     this.iconBtn(bar, 'search', '搜索', () => this.toggleSearch(bar));
     this.iconBtn(bar, 'circle', '只看未读', () => {
       this.unreadOnly = !this.unreadOnly;
@@ -172,10 +172,10 @@ export class WmcView extends ItemView {
   private openChannelMenu(anchor: HTMLElement): void {
     const rect = anchor.getBoundingClientRect();
     const menu = document.body.createDiv('wmc-menu');
-    menu.style.position = 'fixed';
-    menu.style.left = `${rect.left}px`;
-    menu.style.top = `${rect.bottom + 4}px`;
-    menu.style.zIndex = '9999';
+    menu.setCssStyles({ position: 'fixed' });
+    menu.setCssStyles({ left: `${rect.left}px` });
+    menu.setCssStyles({ top: `${rect.bottom + 4}px` });
+    menu.setCssStyles({ zIndex: '9999' });
     const mk = (label: string, value: string) => {
       const it = menu.createDiv('wmc-menu-item');
       it.setText(label);
@@ -400,7 +400,7 @@ export class WmcView extends ItemView {
       const row = list.createDiv('wmc-stat-row');
       row.createSpan({ cls: 'wmc-stat-row-name', text: acc });
       const track = row.createDiv('wmc-stat-track');
-      track.createDiv('wmc-stat-fill').style.width = `${Math.round((n / max) * 100)}%`;
+      track.createDiv('wmc-stat-fill').setCssStyles({ width: `${Math.round((n / max) * 100)}%` });
       row.createSpan({ cls: 'wmc-stat-row-num', text: String(n) });
     }
     if (!top.length) list.createDiv({ cls: 'wmc-hint', text: '还没有数据，先抓一轮。' });
