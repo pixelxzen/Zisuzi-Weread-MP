@@ -5,8 +5,8 @@ const { chromium } = require('/Users/ligerui/node_modules/playwright-core');
 
 const P = '/Volumes/ZenProX/@AIGC2026/@Developer/obsidian-weread-mp';
 const VAULT = '/Volumes/NodexPro/@知识库';
-const PLUG = path.join(VAULT, '.obsidian/plugins/weread-mp-catcher');
-const ID = 'weread-mp-catcher';
+const PLUG = path.join(VAULT, '.obsidian/plugins/zisuzi-weread-mp');
+const ID = 'zisuzi-weread-mp';
 const PROFILE = '/Users/ligerui/.weread-monitor/chrome-profile';
 
 (async () => {

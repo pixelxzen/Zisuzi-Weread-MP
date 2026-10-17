@@ -1,3 +1,5 @@
+# 紫苏子 · 微信读书公众号（zisuzi-WeRead-MP）
+
 # WeRead MP Catcher · 微信读书公众号盯采
 
 在 Obsidian 里登录微信读书，自动盯采**你自己书架里订阅的公众号**更新，把每篇文章（含图片）归档成本地 Markdown 笔记。

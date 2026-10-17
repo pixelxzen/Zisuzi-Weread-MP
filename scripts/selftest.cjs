@@ -5,7 +5,7 @@ const fs = require('fs');
 const path = require('path');
 const { pathToFileURL } = require('url');
 
-const DEFAULT_DATA = '/Volumes/NodexPro/@知识库/.obsidian/plugins/weread-mp-catcher/data.json';
+const DEFAULT_DATA = '/Volumes/NodexPro/@知识库/.obsidian/plugins/zisuzi-weread-mp/data.json';
 
 const http = async (url, headers) => {
   const r = await fetch(url, { headers });

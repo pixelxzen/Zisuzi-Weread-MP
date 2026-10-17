@@ -6,7 +6,7 @@
 const fs = require('fs');
 const path = require('path');
 
-const DATA = process.argv[2] || '/Volumes/NodexPro/@知识库/.obsidian/plugins/weread-mp-catcher/data.json';
+const DATA = process.argv[2] || '/Volumes/NodexPro/@知识库/.obsidian/plugins/zisuzi-weread-mp/data.json';
 const VAULT = process.argv[3] || '/Volumes/NodexPro/@知识库';
 
 function walk(dir, out = []) {

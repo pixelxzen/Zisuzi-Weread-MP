@@ -288,7 +288,7 @@ export class WmcView extends ItemView {
     });
     this.iconBtn(bar, 'settings-2', '设置', () => {
       (this.app as any).setting?.open?.();
-      (this.app as any).setting?.openTabById?.('weread-mp-catcher');
+      (this.app as any).setting?.openTabById?.('zisuzi-weread-mp');
     });
   }
 

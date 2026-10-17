@@ -132,7 +132,7 @@ const DEFAULTS: WMSettings = {
 };
 
 const MIN_INTERVAL = 15; // 风控下限：低于 15 分钟不进风控红线
-const ID = 'weread-mp-catcher';
+const ID = 'zisuzi-weread-mp';
 
 const sleep = (ms: number) => new Promise<void>((r) => window.setTimeout(r, ms));
 

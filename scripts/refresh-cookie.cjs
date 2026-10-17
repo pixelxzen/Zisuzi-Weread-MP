@@ -4,8 +4,8 @@ const { chromium } = require('/Users/ligerui/node_modules/playwright-core');
 
 const PROFILE = '/Users/ligerui/.weread-monitor/chrome-profile';
 const TARGETS = [
-  '/Volumes/ZenProX/@AIGC2026/@Developer/obsidian-weread-mp/qa-vault/.obsidian/plugins/weread-mp-catcher/data.json',
-  '/Volumes/NodexPro/@知识库/.obsidian/plugins/weread-mp-catcher/data.json',
+  '/Volumes/ZenProX/@AIGC2026/@Developer/obsidian-weread-mp/qa-vault/.obsidian/plugins/zisuzi-weread-mp/data.json',
+  '/Volumes/NodexPro/@知识库/.obsidian/plugins/zisuzi-weread-mp/data.json',
 ];
 const NEED = ['wr_vid', 'wr_skey', 'wr_rt', 'wr_gid'];
 

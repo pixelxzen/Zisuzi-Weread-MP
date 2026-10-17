@@ -5,9 +5,9 @@ const { chromium } = require('/Users/ligerui/node_modules/playwright-core');
 
 const P = '/Volumes/ZenProX/@AIGC2026/@Developer/obsidian-weread-mp';
 const QA = path.join(P, 'qa-vault');
-const PLUG = path.join(QA, '.obsidian/plugins/weread-mp-catcher');
+const PLUG = path.join(QA, '.obsidian/plugins/zisuzi-weread-mp');
 const PROFILE = '/Users/ligerui/.weread-monitor/chrome-profile';
-const ID = 'weread-mp-catcher';
+const ID = 'zisuzi-weread-mp';
 
 (async () => {
   // 1) 目录 + 产物
