@@ -327,6 +327,7 @@ export class WmcView extends ItemView {
 
   private renderList(): void {
     const root = this.contentEl;
+    root.empty(); // 搜索 input/筛选 onChange 直接调本函数，必须先清，否则每击一键叠加一份
     this.header(root);
     this.toolbar(root);
     const rows = this.rows();
@@ -373,6 +374,15 @@ export class WmcView extends ItemView {
       step();
     }
     void this.fillSummaries(rows);
+    // 搜索框正在打字时，empty+重建会失焦 → 恢复焦点到末尾
+    if (this.query) {
+      const inp = root.querySelector<HTMLInputElement>('.wmc-searchbox input');
+      if (inp && document.activeElement !== inp) {
+        inp.focus();
+        const len = inp.value.length;
+        inp.setSelectionRange(len, len);
+      }
+    }
   }
 
   private item(r: RowItem): HTMLElement {
