@@ -122,6 +122,130 @@
   content: '▾ ';
 }
 
+/* 登录头像 */
+.wmc-login-avatar {
+  width: 36px;
+  height: 36px;
+  flex: 0 0 36px;
+  border-radius: 50%;
+  object-fit: cover;
+  background: var(--background-modifier-border);
+}
+
+.wmc-login-avatar.is-empty {
+  display: block;
+}
+
+.wmc-login-avatar.is-broken {
+  visibility: hidden;
+}
+
+/* 书架选号器 */
+.wmc-picker {
+  margin-bottom: 10px;
+}
+
+.wmc-picker-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.wmc-picker-hint {
+  color: var(--text-faint);
+}
+
+.wmc-picker-search {
+  margin-bottom: 6px;
+}
+
+.wmc-picker-input {
+  width: 100%;
+  height: 30px;
+  font-size: 13px;
+}
+
+.wmc-picker-list {
+  max-height: 320px;
+  overflow-y: auto;
+  padding: 4px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 8px;
+}
+
+.wmc-pick-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 8px;
+  border-radius: 5px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.wmc-pick-row:hover {
+  background: var(--background-modifier-hover);
+}
+
+.wmc-pick-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-normal);
+}
+
+.wmc-pick-id {
+  flex: 0 0 auto;
+  font-family: var(--font-monospace);
+  font-size: 11px;
+  color: var(--text-faint);
+}
+
+/* 全量归档 Modal */
+.wmc-backfill h3 {
+  margin-top: 0;
+}
+
+.wmc-backfill-tip {
+  margin: 10px 0;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: var(--background-secondary);
+  font-size: 12px;
+  line-height: 1.7;
+  color: var(--text-muted);
+}
+
+.wmc-backfill-body {
+  margin: 8px 0;
+}
+
+.wmc-progress {
+  height: 6px;
+  border-radius: 3px;
+  background: var(--background-modifier-border);
+  overflow: hidden;
+}
+
+.wmc-progress-fill {
+  height: 100%;
+  width: 0;
+  background: var(--text-normal);
+  transition: width 0.2s linear;
+}
+
+.wmc-progress-label {
+  margin-top: 6px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--text-muted);
+}
+
 /* ------------------------------ 列表视图 ------------------------------ */
 
 .wmc-root {

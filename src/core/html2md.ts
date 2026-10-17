@@ -8,9 +8,16 @@ export interface ImageRef {
   alt: string;
 }
 
+export interface MediaRef {
+  type: 'audio' | 'video';
+  url: string;
+  name?: string;
+}
+
 export interface ConvertResult {
   markdown: string;
   images: ImageRef[];
+  media: MediaRef[];
 }
 
 const ENTITIES: Record<string, string> = {
@@ -80,9 +87,10 @@ function inlineToMd(s: string): string {
 
 export function htmlToMarkdown(html: string): ConvertResult {
   const body = extractById(stripJunk(html));
-  if (!body) return { markdown: '', images: [] };
+  if (!body) return { markdown: '', images: [], media: [] };
 
   const images: ImageRef[] = [];
+  const media: MediaRef[] = [];
   let text = body;
 
   // 图片：data-src 优先（微信懒加载），换成占位标记，稍后上层替换成本地路径
@@ -95,6 +103,39 @@ export function htmlToMarkdown(html: string): ConvertResult {
     if (!src || src.startsWith('data:')) return '';
     const idx = images.push({ src, alt }) - 1;
     return `\n\n@@IMG${idx}@@\n\n`;
+  });
+
+  // 音频：微信语音 <mpvoice voice_encode_fileid="…"> 与 <audio src>
+  text = text.replace(/<mpvoice\b[^>]*>/gi, (tag) => {
+    const id = /\bvoice_encode_fileid=["']([^"']+)["']/i.exec(tag);
+    const name = /\bname=["']([^"']*)["']/i.exec(tag);
+    if (!id) return '';
+    const idx = media.push({
+      type: 'audio',
+      url: `https://res.wx.qq.com/voice/getvoice?mediaid=${id[1]}`,
+      name: name ? decodeEntities(name[1]) : '',
+    }) - 1;
+    return `\n\n@@MEDIA${idx}@@\n\n`;
+  });
+  text = text.replace(/<audio\b[\s\S]*?<\/audio>/gi, (block) => {
+    const src = /\bsrc=["']([^"']+)["']/i.exec(block);
+    if (!src) return '';
+    const idx = media.push({ type: 'audio', url: src[1] }) - 1;
+    return `\n\n@@MEDIA${idx}@@\n\n`;
+  });
+
+  // 视频：<video src> 与微信播放器 iframe
+  text = text.replace(/<video\b[\s\S]*?<\/video>/gi, (block) => {
+    const src = /\bsrc=["']([^"']+)["']/i.exec(block);
+    if (!src) return '';
+    const idx = media.push({ type: 'video', url: src[1] }) - 1;
+    return `\n\n@@MEDIA${idx}@@\n\n`;
+  });
+  text = text.replace(/<iframe\b[^>]*>/gi, (tag) => {
+    const src = /\bdata-src=["']([^"']+)["']/i.exec(tag) || /\bsrc=["']([^"']+)["']/i.exec(tag);
+    if (!src) return '';
+    const idx = media.push({ type: 'video', url: src[1] }) - 1;
+    return `\n\n@@MEDIA${idx}@@\n\n`;
   });
 
   // 代码块（pre 里可能含 code 与 <br>）
@@ -129,14 +170,32 @@ export function htmlToMarkdown(html: string): ConvertResult {
     .replace(/\n{3,}/g, '\n\n')
     .trim();
 
-  return { markdown, images };
+  return { markdown, images, media };
 }
 
-/** 把 Markdown 里的 @@IMGn@@ 占位替换成给定路径 */
+/** 把 Markdown 里的 @@IMGn@@ 占位替换成给定路径（含空格/中文时用尖括号包裹） */
 export function replaceImagePlaceholders(markdown: string, paths: string[]): string {
   return markdown.replace(/@@IMG(\d+)@@/g, (_m, i) => {
     const p = paths[Number(i)];
-    return p ? `![](${p})` : '';
+    return p ? `![](<${p}>)` : '';
+  });
+}
+
+/** 媒体占位 @@MEDIA n@@ → HTML 播放器（Obsidian 阅读视图原生支持 audio/video 标签） */
+export function replaceMediaPlaceholders(
+  markdown: string,
+  refs: Array<{ type: 'audio' | 'video'; path?: string; url: string; name?: string }>,
+): string {
+  return markdown.replace(/@@MEDIA(\d+)@@/g, (_m, i) => {
+    const r = refs[Number(i)];
+    if (!r) return '';
+    if (r.path) {
+      return r.type === 'audio'
+        ? `<audio controls src="${r.path}"></audio>`
+        : `<video controls src="${r.path}"></video>`;
+    }
+    // 解析不到直链时降级为可点击的原站链接
+    return `[${r.type === 'audio' ? '🎧 音频' : '🎬 视频'}：${r.name || '播放'}](<${r.url}>)`;
   });
 }
 

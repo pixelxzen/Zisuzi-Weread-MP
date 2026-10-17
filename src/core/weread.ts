@@ -66,6 +66,34 @@ export function baseHeaders(cookie: string): Record<string, string> {
   };
 }
 
+export interface WereadProfile {
+  name: string;
+  avatar: string;
+  avatarPath?: string;
+  vid: string;
+  desc?: string;
+}
+
+/** 登录用户资料（昵称/头像/简介）：GET /web/user?userVid=<wr_vid> */
+export async function fetchProfile(http: HttpFn, cookie: string): Promise<WereadProfile | null> {
+  const ck = normalizeCookie(cookie);
+  const vid = (ck.split(';').map((s) => s.trim()).find((s) => s.startsWith('wr_vid=')) || '').slice('wr_vid='.length);
+  if (!vid) return null;
+  const r = await http(`https://weread.qq.com/web/user?userVid=${encodeURIComponent(vid)}`, {
+    Cookie: ck,
+    'User-Agent': WEREAD_UA,
+    Referer: 'https://weread.qq.com/',
+    Accept: 'application/json, text/plain, */*',
+  });
+  if (r.status !== 200) return null;
+  try {
+    const j: any = JSON.parse(r.text);
+    return { name: j?.name || '', avatar: j?.avatar || '', vid: String(j?.userVid ?? vid), desc: j?.vDesc || '' };
+  } catch {
+    return null;
+  }
+}
+
 function assertNoRisk(json: any, what: string): void {
   const code = json?.errcode ?? json?.errCode;
   if (typeof code === 'number' && code !== 0) {

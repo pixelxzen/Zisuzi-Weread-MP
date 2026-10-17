@@ -13,12 +13,14 @@ import {
   WereadClient,
   checkCookie,
   normalizeCookie,
+  fetchProfile,
   type ArticleItem,
   type HttpFn,
   RiskError,
 } from './core/weread';
 import { htmlToMarkdown, replaceImagePlaceholders, safeFileName } from './core/html2md';
-import { WmcView, VIEW_TYPE_WMC } from './host/weread-view';
+import { WmcView, VIEW_TYPE_WMC } from './host/view-cards';
+import { BackfillModal } from './host/backfill-modal';
 import { WereadAgentApi, fetchApiKey } from './core/weread-api';
 import {
   LLM_DEFAULTS,
@@ -41,10 +43,20 @@ export interface AccountRef {
   bookId: string;
 }
 
+export interface LoginProfile {
+  name: string;
+  avatar: string;
+  avatarPath?: string;
+  vid: string;
+  desc?: string;
+}
+
 export interface WMSettings {
   cookie: string;
   wereadApiKey: string;
   accounts: AccountRef[];
+  shelfAccounts: AccountRef[];
+  loginProfile?: LoginProfile;
   outputDir: string;
   listWidth: number;
   llm: LLMSettings;
@@ -88,6 +100,7 @@ const DEFAULTS: WMSettings = {
   cookie: '',
   wereadApiKey: '',
   accounts: [],
+  shelfAccounts: [],
   outputDir: '微信读书公众号',
   listWidth: 300,
   llm: { ...LLM_DEFAULTS },
@@ -171,6 +184,11 @@ export default class WereadMpCatcher extends Plugin {
       id: 'open-login',
       name: '打开微信读书登录窗口',
       callback: () => this.openLoginWindow(),
+    });
+    this.addCommand({
+      id: 'backfill',
+      name: '归档某个号的全部历史（分批·防风控）',
+      callback: () => new BackfillModal(this.app, this).open(),
     });
 
     this.addSettingTab(new WMSettingTab(this.app, this));
@@ -276,6 +294,36 @@ export default class WereadMpCatcher extends Plugin {
     return key;
   }
 
+  /** 拉登录用户资料（昵称 / 头像 / VID / 简介） */
+  async refreshProfile(): Promise<LoginProfile | null> {
+    const ck = normalizeCookie(this.settings.cookie || '');
+    if (!checkCookie(ck).ok) return null;
+    const p = await fetchProfile(this.http, ck);
+    if (p) {
+      // 头像落地存插件目录，避免外链 CDN 被拦导致空白
+      if (p.avatar) {
+        try {
+          const r = await requestUrl({
+            url: p.avatar,
+            method: 'GET',
+            throw: false,
+            headers: { 'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36' },
+          });
+          if (r.status === 200 && r.arrayBuffer.byteLength > 300) {
+            const path = `${this.manifest.dir}/avatar.jpg`;
+            await this.app.vault.adapter.writeBinary(path, r.arrayBuffer);
+            p.avatarPath = path;
+          }
+        } catch {
+          /* 头像下载失败不阻塞登录 */
+        }
+      }
+      this.settings.loginProfile = p;
+      await this.saveAll();
+    }
+    return p;
+  }
+
   /** 从官方书架同步公众号清单 */
   async syncAccountsFromShelf(): Promise<number> {
     if (!this.settings.wereadApiKey) {
@@ -289,7 +337,9 @@ export default class WereadMpCatcher extends Plugin {
       const api = new WereadAgentApi(this.llmHttp, this.settings.wereadApiKey);
       const list = await api.mpAccounts();
       if (!list.length) return 0;
-      this.settings.accounts = list;
+      this.settings.shelfAccounts = list;
+      // 首次同步（还没选过）时默认勾前 10 个，之后尊重用户勾选
+      if (!this.settings.accounts.length) this.settings.accounts = list.slice(0, 10);
       await this.saveAll();
       return list.length;
     } catch (e) {
@@ -568,6 +618,72 @@ export default class WereadMpCatcher extends Plugin {
     }
   }
 
+  /** 单号全量历史归档：分批翻页 + 风控节流 + 可中断 */
+  async runBackfill(
+    acc: AccountRef,
+    opts: { maxItems: number; fromDate: string; speed: 'safe' | 'slow' },
+    onProgress: (p: { phase: 'list' | 'fetch'; done: number; total: number; written: number; title?: string }) => void,
+    signal: { stop: boolean },
+  ): Promise<{ written: number; skipped: number; stopped: boolean; error?: string }> {
+    const cookie = normalizeCookie(this.settings.cookie || '');
+    if (!checkCookie(cookie).ok) return { written: 0, skipped: 0, stopped: true, error: '登录态无效，请重新扫码' };
+    const client = new WereadClient(this.http, cookie);
+    const T =
+      opts.speed === 'slow'
+        ? { list: 3000, content: 6000, every: 10, rest: 120000 }
+        : { list: 1200, content: 2500, every: 15, rest: 60000 };
+    const fromTs = opts.fromDate ? Math.floor(new Date(`${opts.fromDate}T00:00:00`).getTime() / 1000) : 0;
+
+    // ① 翻列表
+    const seen = new Set<string>();
+    const list: ArticleItem[] = [];
+    const maxPages = opts.maxItems > 0 ? Math.ceil(opts.maxItems / 20) + 3 : 300;
+    for (let p = 0; p < maxPages; p++) {
+      if (signal.stop) break;
+      const items = await client.listArticles(acc.bookId, p * 20);
+      if (!items.length) break;
+      let added = 0;
+      for (const it of items) {
+        if (seen.has(it.reviewId)) continue;
+        seen.add(it.reviewId);
+        if (fromTs && it.time && it.time < fromTs) continue;
+        list.push(it);
+        added++;
+      }
+      onProgress({ phase: 'list', done: p + 1, total: maxPages, written: 0, title: `已翻 ${p + 1} 页 · 累计 ${list.length} 篇` });
+      if (added === 0) break;
+      await sleep(T.list);
+    }
+
+    // ② 逐篇抓正文
+    const todo = list
+      .filter((a) => !this.state.processed[a.reviewId])
+      .slice(0, opts.maxItems > 0 ? opts.maxItems : list.length);
+    let written = 0;
+    let skipped = 0;
+    let n = 0;
+    for (const it of todo) {
+      if (signal.stop) break;
+      n++;
+      try {
+        const ok = await this.fetchOne(client, acc, it);
+        if (ok) written++;
+        else skipped++;
+      } catch (e) {
+        if (e instanceof RiskError) {
+          await this.saveAll();
+          return { written, skipped, stopped: true, error: `命中风控 ${e.message}：已停止，不要立刻重试` };
+        }
+        skipped++;
+      }
+      onProgress({ phase: 'fetch', done: n, total: todo.length, written, title: it.title });
+      if (n % T.every === 0) await sleep(T.rest);
+      else await sleep(T.content);
+    }
+    await this.saveAll();
+    return { written, skipped, stopped: signal.stop };
+  }
+
   /** 用当前 cookie 探测书架号数（设置页「测试连接」用） */
   async testConnection(): Promise<string> {
     const cookie = normalizeCookie(this.settings.cookie || '');
@@ -724,21 +840,45 @@ class WMSettingTab extends PluginSettingTab {
     containerEl.createEl('h3', { text: '登录' });
     const st = this.plugin.loginState();
     const card = containerEl.createDiv('wmc-login');
+    const prof = this.plugin.settings.loginProfile;
+    const avatarSrc = prof?.avatarPath
+      ? this.app.vault.adapter.getResourcePath(prof.avatarPath)
+      : prof?.avatar;
+    if (avatarSrc) {
+      const img = card.createEl('img', { cls: 'wmc-login-avatar' });
+      img.src = avatarSrc;
+      img.referrerPolicy = 'no-referrer';
+      img.addEventListener('error', () => img.addClass('is-broken'));
+    } else {
+      card.createDiv({ cls: 'wmc-login-avatar is-empty' });
+    }
     card.createDiv({ cls: `wmc-login-dot is-${st}` });
     const txt = card.createDiv('wmc-login-text');
     txt.createDiv({
       cls: 'wmc-login-title',
-      text: st === 'full' ? '已登录' : st === 'cookie' ? '登录不完整' : '未登录',
+      text: prof?.name || (st === 'full' ? '已登录' : st === 'cookie' ? '登录不完整' : '未登录'),
     });
     txt.createDiv({
       cls: 'wmc-login-sub',
       text:
-        st === 'full'
-          ? `官方 Key 有效 · 书架 ${this.plugin.settings.accounts.length} 个公众号`
-          : st === 'cookie'
-            ? '建议重新扫码，或点「同步书架」补全'
-            : '扫码即可，不需要复制任何 Cookie',
+        st === 'none'
+          ? '扫码即可，不需要复制任何 Cookie'
+          : [
+              prof?.vid ? `VID ${prof.vid}` : '',
+              st === 'full' ? '官方 Key 有效' : '登录态不完整',
+              `书架 ${this.plugin.settings.shelfAccounts.length || this.plugin.settings.accounts.length} 个 · 已选 ${this.plugin.settings.accounts.length}`,
+              prof?.desc || '',
+            ]
+              .filter(Boolean)
+              .join(' · '),
     });
+
+    // 有登录态但还没拉过资料时，异步补一次（不阻塞界面）
+    if (!prof && st !== 'none') {
+      void this.plugin.refreshProfile().then((p) => {
+        if (p) this.display();
+      });
+    }
 
     new Setting(containerEl)
       .setName('扫码登录')
@@ -786,32 +926,17 @@ class WMSettingTab extends PluginSettingTab {
         }),
       );
 
-    /* 2. 公众号 */
-    containerEl.createEl('h3', { text: '公众号' });
-    const accWrap = containerEl.createDiv('wmc-accounts');
-    if (!this.plugin.settings.accounts.length) {
-      accWrap.createEl('p', { text: '还没有添加公众号。', cls: 'wmc-empty' });
-    }
-    this.plugin.settings.accounts.forEach((acc, idx) => {
-      new Setting(accWrap)
-        .setName(acc.name || acc.bookId)
-        .setDesc(acc.bookId)
-        .addExtraButton((b) =>
-          b
-            .setIcon('trash')
-            .onClick(async () => {
-              this.plugin.settings.accounts.splice(idx, 1);
-              await this.plugin.saveAll();
-              this.display();
-            }),
-        );
-    });
+    /* 2. 公众号：搜索 + 勾选 */
+    containerEl.createEl('h3', { text: '盯采公众号' });
+    this.renderPicker(containerEl);
 
-    new Setting(containerEl)
-      .setName('添加公众号')
-      .setDesc('一行一个：名称 | MP_WXS_xxx（也可粘贴阅读页 URL）')
+    const adv2 = containerEl.createEl('details', { cls: 'wmc-adv' });
+    adv2.createEl('summary', { text: '手动添加（书架上没有的号）' });
+    new Setting(adv2)
+      .setName('名称 | MP_WXS_xxx')
+      .setDesc('一行一个，也接受阅读页 URL')
       .addTextArea((t) => {
-        t.setPlaceholder('机器之心 | MP_WXS_3073282833\n量子位 | MP_WXS_3236757533');
+        t.setPlaceholder('机器之心 | MP_WXS_3073282833');
         t.inputEl.rows = 3;
         t.inputEl.addClass('wmc-accounts-input');
         t.onChange((v) => (this.accountsDraft = v));
@@ -823,7 +948,11 @@ class WMSettingTab extends PluginSettingTab {
             new Notice('没识别到 bookId（需要 MP_WXS_ 开头）');
             return;
           }
-          this.plugin.settings.accounts.push(...added);
+          for (const a of added) {
+            if (!this.plugin.settings.accounts.some((x) => x.bookId === a.bookId)) {
+              this.plugin.settings.accounts.push(a);
+            }
+          }
           await this.plugin.saveAll();
           this.accountsDraft = '';
           this.display();
@@ -1040,6 +1169,115 @@ class WMSettingTab extends PluginSettingTab {
           await this.plugin.saveAll();
           new Notice('已清空（不会删除已有笔记，但会重复抓取）');
           this.display();
+        }),
+      );
+  }
+
+  /** 书架公众号选号器：搜索 + 勾选（分片渲染，支持上千个号） */
+  private renderPicker(parent: HTMLElement): void {
+    const plug = this.plugin;
+    const shelf = plug.settings.shelfAccounts.length
+      ? plug.settings.shelfAccounts
+      : plug.settings.accounts;
+    const picked = new Set(plug.settings.accounts.map((a) => a.bookId));
+
+    const wrap = parent.createDiv('wmc-picker');
+    const head = wrap.createDiv('wmc-picker-head');
+    head.createSpan({ cls: 'wmc-picker-count', text: `已选 ${picked.size} / 书架 ${shelf.length}` });
+    if (!plug.settings.shelfAccounts.length) {
+      head.createSpan({ cls: 'wmc-picker-hint', text: '（点上方「同步书架」拉取全部订阅）' });
+    }
+
+    const searchWrap = wrap.createDiv('wmc-picker-search');
+    const input = searchWrap.createEl('input', { type: 'search', placeholder: '搜索公众号名称…' });
+    input.addClass('wmc-picker-input');
+
+    const listEl = wrap.createDiv('wmc-picker-list');
+    let filter = '';
+
+    const syncCount = () => {
+      const el = head.querySelector('.wmc-picker-count');
+      if (el) el.setText(`已选 ${plug.settings.accounts.length} / 书架 ${shelf.length}`);
+    };
+
+    const toggle = async (acc: AccountRef, on: boolean) => {
+      if (on) {
+        if (!plug.settings.accounts.some((x) => x.bookId === acc.bookId)) plug.settings.accounts.push(acc);
+        picked.add(acc.bookId);
+      } else {
+        plug.settings.accounts = plug.settings.accounts.filter((x) => x.bookId !== acc.bookId);
+        picked.delete(acc.bookId);
+      }
+      await plug.saveAll();
+      syncCount();
+    };
+
+    const draw = () => {
+      listEl.empty();
+      const items = shelf.filter((a) => !filter || a.name.toLowerCase().includes(filter) || a.bookId.includes(filter));
+      if (!items.length) {
+        listEl.createDiv({ cls: 'wmc-empty', text: '没有匹配的公众号' });
+        return;
+      }
+      let i = 0;
+      const chunk = 100;
+      const step = () => {
+        const frag = document.createDocumentFragment();
+        for (const a of items.slice(i, i + chunk)) {
+          const label = document.createElement('label');
+          label.className = 'wmc-pick-row';
+          const cb = document.createElement('input');
+          cb.type = 'checkbox';
+          cb.checked = picked.has(a.bookId);
+          cb.addEventListener('change', () => void toggle(a, cb.checked));
+          const nm = document.createElement('span');
+          nm.className = 'wmc-pick-name';
+          nm.textContent = a.name;
+          const id = document.createElement('span');
+          id.className = 'wmc-pick-id';
+          id.textContent = a.bookId.replace('MP_WXS_', '#');
+          label.appendChild(cb);
+          label.appendChild(nm);
+          label.appendChild(id);
+          frag.appendChild(label);
+        }
+        i += chunk;
+        listEl.appendChild(frag);
+        if (i < items.length) window.setTimeout(step, 0);
+      };
+      step();
+    };
+
+    input.addEventListener('input', () => {
+      filter = input.value.trim().toLowerCase();
+      draw();
+    });
+    draw();
+
+    new Setting(wrap)
+      .setName('批量操作')
+      .setDesc('只作用于当前搜索结果')
+      .addButton((b) =>
+        b.setButtonText('全选结果').onClick(async () => {
+          const items = shelf.filter((a) => !filter || a.name.toLowerCase().includes(filter) || a.bookId.includes(filter));
+          for (const a of items) {
+            if (!picked.has(a.bookId)) {
+              plug.settings.accounts.push(a);
+              picked.add(a.bookId);
+            }
+          }
+          await plug.saveAll();
+          syncCount();
+          draw();
+        }),
+      )
+      .addButton((b) =>
+        b.setButtonText('清空').onClick(async () => {
+          plug.settings.accounts = [];
+          picked.clear();
+          await plug.saveAll();
+          syncCount();
+          draw();
         }),
       );
   }
