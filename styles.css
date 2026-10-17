@@ -1935,6 +1935,177 @@
   color: #fbbf24;
 }
 
+/* ===================== v0.9.0 finesse 层（product 工作台 + ai-console） ===================== */
+
+/* —— KPI tiles：icon chip + 双行数字 —— */
+.wmc-root .wmc-statbar {
+  gap: 14px;
+  height: auto;
+  min-height: 44px;
+  padding: 6px 12px;
+}
+
+.wmc-root .wmc-statbar-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 8px;
+  border-radius: 9px;
+  transition: background 0.12s ease;
+}
+
+.wmc-root .wmc-statbar-item:hover {
+  background: var(--wmc-hover, var(--background-modifier-hover));
+  transform: none;
+}
+
+.wmc-statbar-chip {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--wmc-brand, #474980) 11%, transparent);
+  color: var(--wmc-brand, #474980);
+  flex: 0 0 auto;
+}
+
+.wmc-statbar-chip .svg-icon {
+  width: 14px;
+  height: 14px;
+}
+
+.wmc-statbar-col {
+  display: flex;
+  flex-direction: column;
+  line-height: 1.2;
+  gap: 1px;
+}
+
+.wmc-root .wmc-statbar-value {
+  font-size: 14px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  font-variant-numeric: tabular-nums;
+  color: var(--wmc-ink-1, var(--text-normal));
+}
+
+.wmc-root .wmc-statbar-label {
+  font-size: 10.5px;
+  color: var(--wmc-ink-3, var(--text-faint));
+  letter-spacing: 0.02em;
+}
+
+/* —— run stream：rail 竖线 + 类型 icon —— */
+.wmc-root .wmc-watchlog {
+  position: relative;
+  padding: 8px 12px 10px;
+}
+
+.wmc-root .wmc-watchlog::before {
+  content: '';
+  position: absolute;
+  left: 17px;
+  top: 10px;
+  bottom: 12px;
+  width: 1px;
+  background: var(--wmc-line, var(--background-modifier-border));
+}
+
+.wmc-watchlog-row {
+  position: relative;
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 3px 0;
+}
+
+.wmc-watchlog-ico {
+  position: relative;
+  z-index: 1;
+  display: inline-flex;
+  flex: 0 0 11px;
+  transform: translateY(1px);
+  color: var(--wmc-ink-3, var(--text-faint));
+}
+
+.wmc-watchlog-ico .svg-icon {
+  width: 11px;
+  height: 11px;
+}
+
+.wmc-watchlog-row.is-ok .wmc-watchlog-ico {
+  color: #4ade80;
+}
+
+.wmc-watchlog-row.is-err .wmc-watchlog-ico {
+  color: #f87171;
+}
+
+.wmc-watchlog-row.is-warn .wmc-watchlog-ico {
+  color: #fbbf24;
+}
+
+/* —— 常驻停止：盯采中时是 accent-filled，看得见、摸得着 —— */
+.wmc-watch-actions .wmc-icon-btn.is-live {
+  background: var(--wmc-brand, #474980);
+  color: #fff;
+}
+
+.wmc-watch-actions .wmc-icon-btn.is-live:hover {
+  background: color-mix(in srgb, var(--wmc-brand, #474980) 85%, #fff);
+  color: #fff;
+}
+
+/* —— tinted surfaces：品牌紫 3% 调进卡片底，whisper shadow —— */
+.wmc-root .wmc-card {
+  background: color-mix(in srgb, var(--wmc-brand, #474980) 2.5%, var(--background-primary));
+  border: 1px solid color-mix(in srgb, var(--wmc-brand, #474980) 7%, transparent);
+  box-shadow: 0 1px 3px rgba(40, 38, 90, 0.05);
+}
+
+.wmc-root .wmc-card:hover {
+  border-color: color-mix(in srgb, var(--wmc-brand, #474980) 22%, transparent);
+}
+
+/* 面板/日志/统计条统一 hairline + 软 tint */
+.wmc-panel,
+.wmc-root .wmc-watchlog,
+.wmc-root .wmc-statbar,
+.wmc-root .wmc-watchbar {
+  border-color: color-mix(in srgb, var(--wmc-brand, #474980) 6%, var(--background-modifier-border));
+}
+
+/* —— 全局 focus ring：品牌紫软环（替代浏览器默认 outline） —— */
+.wmc-root :is(button, input, select, a, [tabindex]):focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--wmc-brand, #474980) 20%, transparent);
+  border-radius: 6px;
+}
+
+/* —— 分段按钮组：选中态用品牌紫软底而非灰 —— */
+.wmc-root .wmc-seg.is-active {
+  background: color-mix(in srgb, var(--wmc-brand, #474980) 12%, transparent);
+  border-color: color-mix(in srgb, var(--wmc-brand, #474980) 25%, transparent);
+  color: var(--wmc-brand, #474980);
+}
+
+/* —— 盯采状态点：idle 绿改语义绿，busy 用品牌紫脉动（已有），离线灰 —— */
+.wmc-watch-dot.is-idle {
+  background: #34c98e;
+  box-shadow: 0 0 0 3px rgba(52, 201, 142, 0.15);
+}
+
+/* —— 卡片已归档徽标：品牌紫软底 chip —— */
+.wmc-card-badge {
+  background: color-mix(in srgb, var(--wmc-brand, #474980) 12%, var(--background-primary));
+  color: var(--wmc-brand, #474980);
+  font-weight: 500;
+}
+
+/* finesse · register=product · workbench+ai-console · lilac-ramp × #474980 · SOUL=6 SPECTACLE=2 DENSITY=7 */
+
 /* ------------------------- v0.8.0 盯采面板（左侧抽屉） ------------------------- */
 
 .wmc-root {

@@ -350,14 +350,42 @@ export default class WereadMpCatcher extends Plugin {
     }
   }
 
-  /** 打开登录窗口（Electron 新窗口，与 Obsidian 共享 session） */
+  /** 打开登录窗口（Electron 新窗口，与 Obsidian 共享 session），并轮询等 cookie 成熟后自动写入 */
   openLoginWindow() {
     const w = window.open('https://weread.qq.com/', '_blank');
     if (!w) {
       new Notice('无法打开窗口：请改用浏览器登录后粘贴 Cookie');
       return;
     }
-    new Notice('扫码登录后回到 Obsidian，点击设置里的「读取登录态」', 8000);
+    new Notice('扫码登录中…完成后会自动写入（最长等 90 秒）', 6000);
+    void this.waitForMatureCookie(90000).then((ok) => {
+      if (ok) {
+        new Notice('登录成功，完整 Cookie 已写入');
+        void this.refreshApiKey();
+        void this.refreshProfile();
+      } else {
+        new Notice('90 秒内没读到完整登录态。若已扫码，请点「设置 → 读取登录态」重试', 10000);
+      }
+    });
+  }
+
+  /** 轮询直到 cookie 成熟（wr_skey 为长串）。扫码确认前会拿到 8 字符临时值，必须等它变长。 */
+  private async waitForMatureCookie(maxWaitMs: number): Promise<boolean> {
+    const start = Date.now();
+    while (Date.now() - start < maxWaitMs) {
+      const ck = await this.tryReadSessionCookie();
+      if (ck) {
+        const chk = checkCookie(ck);
+        if (chk.ok) {
+          this.settings.cookie = ck;
+          await this.saveAll();
+          this.emitWatch();
+          return true;
+        }
+      }
+      await new Promise((r) => window.setTimeout(r, 2000));
+    }
+    return false;
   }
 
   async importSessionCookie(): Promise<boolean> {

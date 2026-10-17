@@ -46,12 +46,13 @@ export function normalizeCookie(raw: string): string {
 
 /** 完整性检查：缺 wr_gid 会稳定拿到 -2012（实测） */
 export function checkCookie(cookie: string): { ok: boolean; missing: string[] } {
-  const need = ['wr_vid', 'wr_skey', 'wr_rt', 'wr_gid'];
+  const norm = normalizeCookie(cookie);
   const have = new Set(
-    normalizeCookie(cookie)
+    norm
       .split(';')
       .map((s) => s.split('=')[0].trim()),
   );
+  const need = ['wr_vid', 'wr_skey', 'wr_rt', 'wr_gid'];
   const missing = need.filter((n) => !have.has(n));
   return { ok: missing.length === 0, missing };
 }

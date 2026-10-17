@@ -323,10 +323,11 @@ export class WmcView extends ItemView {
     const bar = parent.createDiv('wmc-statbar');
     const item = (icon: string, value: string, label: string) => {
       const el = bar.createDiv('wmc-statbar-item');
-      const i = el.createSpan('wmc-statbar-ico');
-      setIcon(i, icon);
-      el.createSpan({ cls: 'wmc-statbar-value', text: value });
-      el.createSpan({ cls: 'wmc-statbar-label', text: label });
+      const chip = el.createSpan('wmc-statbar-chip');
+      setIcon(chip, icon);
+      const col = el.createSpan('wmc-statbar-col');
+      col.createSpan({ cls: 'wmc-statbar-value', text: value });
+      col.createSpan({ cls: 'wmc-statbar-label', text: label });
     };
     item('book-open', String(subs), '订阅');
     item('file-check-2', String(archived), '已归档');
@@ -348,10 +349,16 @@ export class WmcView extends ItemView {
     bar.createDiv('wmc-watch-text');
     const actions = bar.createDiv('wmc-watch-actions');
     this.iconBtn(actions, 'zap', '立即抓取一轮', () => void this.plugin.runOnce(true));
-    this.iconBtn(actions, s.running ? 'pause' : 'play', s.running ? '暂停盯采' : '开始盯采', () => {
-      this.plugin.toggleWatchFromView();
-      this.refreshWatchbar();
-    });
+    const stopBtn = this.iconBtn(
+      actions,
+      s.busy ? 'square' : s.running ? 'pause' : 'play',
+      s.busy ? '停止盯采' : s.running ? '暂停盯采' : '开始盯采',
+      () => {
+        this.plugin.toggleWatchFromView();
+        this.refreshWatchbar();
+      },
+    );
+    if (s.busy || s.running) stopBtn.addClass('is-live');
     this.iconBtn(actions, 'scroll-text', this.logOpen ? '收起日志' : '盯采日志', () => {
       this.logOpen = !this.logOpen;
       this.render();
@@ -368,8 +375,11 @@ export class WmcView extends ItemView {
       return;
     }
     const p = (n: number) => String(n).padStart(2, '0');
+    const LOG_ICON: Record<string, string> = { info: 'circle', ok: 'check', warn: 'alert-triangle', err: 'x-circle' };
     for (const it of items) {
       const row = panel.createDiv(`wmc-watchlog-row is-${it.kind}`);
+      const ico = row.createSpan('wmc-watchlog-ico');
+      setIcon(ico, LOG_ICON[it.kind] || 'circle');
       const d = new Date(it.at);
       row.createSpan({ cls: 'wmc-watchlog-time', text: `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}` });
       row.createSpan({ cls: 'wmc-watchlog-text', text: it.text });
