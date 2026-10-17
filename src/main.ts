@@ -232,9 +232,61 @@ export default class WereadMpCatcher extends Plugin {
     }
   }
 
+  /**
+   * HTTP 层：优先走 Electron net.request + 独立 partition（不带 defaultSession 的 cookie）。
+   * 原因：Obsidian requestUrl 会把 defaultSession 里残留的 weread 旧 cookie 和手动 Cookie
+   * 头一起发出，服务端读到旧的就报 -2012。独立 partition 保证只发我们给的那份。
+   */
   private http: HttpFn = async (url: string, headers: Record<string, string>) => {
-    const param: RequestUrlParam = { url, method: 'GET', headers, throw: false };
-    const r = await requestUrl(param);
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      const electron: any = (window as any).require?.('electron');
+      const net = electron?.remote?.net;
+      const session = electron?.remote?.session;
+      if (net && session) {
+        return await new Promise((resolve, reject) => {
+          const req = net.request({
+            url,
+            method: 'GET',
+            session: session.fromPartition('wmc-isolated'),
+            useSessionCookies: false,
+          });
+          for (const [k, v] of Object.entries(headers)) {
+            try {
+              req.setHeader(k, v);
+            } catch {
+              /* 非法头名跳过 */
+            }
+          }
+          const chunks: Uint8Array[] = [];
+          req.on('response', (res: any) => {
+            res.on('data', (c: Uint8Array) => chunks.push(c));
+            res.on('end', () => {
+              let total = 0;
+              for (const c of chunks) total += c.byteLength;
+              const out = new Uint8Array(total);
+              let off = 0;
+              for (const c of chunks) {
+                out.set(c, off);
+                off += c.byteLength;
+              }
+              const bytes = out.buffer.slice(out.byteOffset, out.byteOffset + out.byteLength) as ArrayBuffer;
+              resolve({
+                status: res.statusCode ?? 0,
+                text: new TextDecoder('utf-8').decode(bytes),
+                bytes,
+              });
+            });
+            res.on('error', reject);
+          });
+          req.on('error', reject);
+          req.end();
+        });
+      }
+    } catch {
+      /* 落到 requestUrl */
+    }
+    const r = await requestUrl({ url, method: 'GET', headers, throw: false });
     return { status: r.status, text: r.text, bytes: r.arrayBuffer };
   };
 
@@ -403,6 +455,42 @@ export default class WereadMpCatcher extends Plugin {
 
   /* ------------------------------ 扫码登录 ------------------------------ */
 
+  /** 选中某个号但视图里没有它的文章时，单号轻量拉列表（不抓正文） */
+  async fetchAccountList(name: string): Promise<number> {
+    const acc =
+      this.settings.accounts.find((a) => a.name === name) ||
+      this.settings.shelfAccounts.find((a) => a.name === name);
+    if (!acc?.bookId) return 0;
+    const cookie = normalizeCookie(this.settings.cookie || '');
+    if (!checkCookie(cookie).ok) return 0;
+    const client = new WereadClient(this.http, cookie);
+    try {
+      const items = await client.listArticlesPages(acc.bookId, Math.max(1, this.settings.pages));
+      if (!this.state.discovered) this.state.discovered = {};
+      let added = 0;
+      for (const it of items) {
+        if (!this.state.discovered[it.reviewId]) {
+          this.state.discovered[it.reviewId] = {
+            account: acc.name,
+            title: it.title,
+            time: it.time,
+            readNum: it.readNum,
+            likeNum: it.likeNum,
+            picUrl: it.picUrl,
+          };
+          added++;
+        }
+      }
+      if (added) await this.saveAll();
+      this.notifyViews();
+      if (added) new Notice(`「${name}」已加载 ${items.length} 篇`);
+      return items.length;
+    } catch (e) {
+      new Notice(`加载「${name}」失败：${e instanceof Error ? e.message : String(e)}`, 6000);
+      return 0;
+    }
+  }
+
   /** 登出：清本地登录态 + 清 Electron session 里 weread 域 cookie（不清的话重扫码还是旧账号） */
   async logout(): Promise<void> {
     try {
@@ -418,6 +506,13 @@ export default class WereadMpCatcher extends Plugin {
     this.settings.cookie = '';
     this.settings.wereadApiKey = '';
     this.settings.loginProfile = undefined;
+    // 切换账号必须清掉旧账号的书架/勾选/文章索引，否则两个账号数据混在一个视图里
+    this.settings.accounts = [];
+    this.settings.shelfAccounts = [];
+    this.state.discovered = {};
+    this.state.read = {};
+    this.state.summaries = {};
+    this.state.processed = {};
     try {
       const avatarPath = `${this.manifest.dir}/avatar.jpg`;
       if (await this.app.vault.adapter.exists(avatarPath)) await this.app.vault.adapter.remove(avatarPath);

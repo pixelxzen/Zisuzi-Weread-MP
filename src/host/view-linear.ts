@@ -288,6 +288,10 @@ export class WmcView extends ItemView {
     mkSelect('按公众号筛选', accounts, this.account, (v) => {
       this.account = v;
       this.renderList();
+      // 选中的号还没有任何文章 → 自动拉它的列表（避免空白）
+      if (v && !this.allRows().some((r) => r.account === v)) {
+        void this.plugin.fetchAccountList(v);
+      }
     });
     mkSelect('已归档状态', [['all', '全部状态'], ['archived', '已归档'], ['pending', '未归档']] as Array<[string, string]>, this.archFilter, (v) => {
       this.archFilter = v as ArchFilter;
