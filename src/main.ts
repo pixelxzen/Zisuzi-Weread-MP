@@ -15,6 +15,7 @@ import {
   checkCookie,
   normalizeCookie,
   fetchProfile,
+  fetchCurrentUser,
   probeAccess,
   type ArticleItem,
   type HttpFn,
@@ -66,6 +67,8 @@ export interface WMSettings {
   panelOpen: boolean;
   agent: AgentSettings;
   agentDocked: boolean;
+  /** true = 用 Obsidian 自带 session 的登录态（不手动传 Cookie） */
+  useSession?: boolean;
   outputDir: string;
   listWidth: number;
   llm: LLMSettings;
@@ -283,7 +286,7 @@ export default class WereadMpCatcher extends Plugin {
    * 教训：v0.9.2 曾改用 Electron net.request + 独立 partition，结果 response 事件不触发，
    * 请求永久 pending → 界面"假死"。net.request 在 renderer 里不可靠，已回退。
    */
-  private http: HttpFn = async (url: string, headers: Record<string, string>) => {
+  private rawHttp = async (url: string, headers: Record<string, string>) => {
     let timer: number | undefined;
     try {
       const r = await Promise.race([
@@ -297,6 +300,72 @@ export default class WereadMpCatcher extends Plugin {
       if (timer !== undefined) window.clearTimeout(timer);
     }
   };
+
+  /**
+   * HTTP 双保险：
+   * 1) 先用插件里存的 Cookie；
+   * 2) 若返回风控/登录失效码（-20xx），去掉 Cookie 头重试一次
+   *    —— Obsidian 的 requestUrl 走 Electron defaultSession，用户在本应用内
+   *       登录微信读书后的新登录态就在里面，这条兜底能自动接管。
+   */
+  private respOk(r: { status: number; text: string }): boolean {
+    if (r.status !== 200) return false;
+    // 微信读书的错误码字段名有 errCode / errcode / errorCode 几种写法
+    const m = /"err(?:Code|code|orCode)"\s*:\s*(-?\d+)/.exec(r.text);
+    if (m && /^-20\d\d$/.test(m[1])) return false;
+    if (/^-20\d\d$/.test(r.text.slice(0, 40).trim())) return false;
+    return true;
+  }
+
+  private http: HttpFn = async (url: string, headers: Record<string, string>) => {
+    const useSession = !!this.settings.useSession;
+    const h1: Record<string, string> = { ...headers };
+    if (useSession) {
+      delete h1.Cookie;
+      delete h1.cookie;
+    }
+    const r1 = await this.rawHttp(url, h1);
+    if (this.respOk(r1)) return r1;
+    // 反向兜底：session 模式失败就试手动 Cookie，反之亦然
+    const h2: Record<string, string> = { ...headers };
+    if (useSession) {
+      if (this.settings.cookie) h2.Cookie = this.settings.cookie;
+    } else {
+      delete h2.Cookie;
+      delete h2.cookie;
+    }
+    try {
+      const r2 = await this.rawHttp(url, h2);
+      if (this.respOk(r2)) {
+        // 兜底成功 → 记住哪种方式可用
+        this.settings.useSession = !useSession;
+        return r2;
+      }
+    } catch {
+      /* 保留第一次结果 */
+    }
+    return r1;
+  };
+
+  /** 探测 Obsidian 自带 session 里是否有有效登录态（不依赖已移除的 electron.remote） */
+  async probeSessionLogin(): Promise<boolean> {
+    const UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
+    const probes = [
+      'https://weread.qq.com/web/shelf/sync?synckey=0',
+      'https://weread.qq.com/web/user?userVid=',
+    ];
+    for (const u of probes) {
+      try {
+        const r = await this.rawHttp(u, { 'User-Agent': UA, Referer: 'https://weread.qq.com/', Accept: 'application/json, text/plain, */*' });
+        if (r.status !== 200) continue;
+        if (/"err(?:Code|code)"\s*:\s*-20\d\d/.test(r.text)) continue;
+        if (/"books"|"archive"|"synckey"|"userVid"/.test(r.text)) return true;
+      } catch {
+        /* 下一个 */
+      }
+    }
+    return false;
+  }
 
 
   async onload() {
@@ -386,6 +455,12 @@ export default class WereadMpCatcher extends Plugin {
           12000,
         );
       },
+    });
+    void this.autoDetectSession();
+    this.addCommand({
+      id: 'diagnose-login',
+      name: '诊断登录态（写入 诊断.txt）',
+      callback: () => void this.diagnoseLogin(),
     });
     this.addCommand({
       id: 'backfill',
@@ -514,7 +589,7 @@ export default class WereadMpCatcher extends Plugin {
     if (!m) throw new Error('这篇笔记里没有 weread 来源标记，无法定位原文');
     const reviewId = m[1].trim();
     const cookie = normalizeCookie(this.settings.cookie || '');
-    if (!checkCookie(cookie).ok) throw new Error('登录态无效，请先去设置里扫码登录');
+    if (!this.hasLogin()) throw new Error('登录态无效，请先去设置里扫码登录');
 
     const client = new WereadClient(this.http, cookie);
     const html = await client.getContentHtml(reviewId);
@@ -672,7 +747,7 @@ export default class WereadMpCatcher extends Plugin {
   /** 批量下载选中的文章（只下选的，不碰其他） */
   async archiveMany(rids: string[]): Promise<{ ok: number; fail: number }> {
     const cookie = normalizeCookie(this.settings.cookie || '');
-    if (!checkCookie(cookie).ok) throw new Error('登录态无效，请先扫码登录');
+    if (!this.hasLogin()) throw new Error('登录态无效，请先扫码登录');
     const client = new WereadClient(this.http, cookie);
     let ok = 0;
     let fail = 0;
@@ -725,7 +800,7 @@ export default class WereadMpCatcher extends Plugin {
       this.settings.shelfAccounts.find((a) => a.name === name);
     if (!acc?.bookId) return 0;
     const cookie = normalizeCookie(this.settings.cookie || '');
-    if (!checkCookie(cookie).ok) return 0;
+    if (!this.hasLogin()) return 0;
     const client = new WereadClient(this.http, cookie);
     if (!this.state.discovered) this.state.discovered = {};
     if (!this.state.accountOffsets) this.state.accountOffsets = {};
@@ -778,7 +853,7 @@ export default class WereadMpCatcher extends Plugin {
       this.settings.shelfAccounts.find((a) => a.name === name);
     if (!acc?.bookId) return 0;
     const cookie = normalizeCookie(this.settings.cookie || '');
-    if (!checkCookie(cookie).ok) return 0;
+    if (!this.hasLogin()) return 0;
     const client = new WereadClient(this.http, cookie);
     if (!this.state.discovered) this.state.discovered = {};
     let added = 0;
@@ -859,6 +934,29 @@ export default class WereadMpCatcher extends Plugin {
     this.emitWatch();
   }
 
+  /** 启动自检：没有 cookie 但 Obsidian session 里已登录 → 自动切 session 模式 */
+  async autoDetectSession(): Promise<void> {
+    if (this.hasLogin()) return;
+    try {
+      if (!(await this.probeSessionLogin())) return;
+      this.settings.useSession = true;
+      await this.saveAll();
+      await this.refreshProfile().catch(() => null);
+      await this.syncAccountsFromShelf();
+      this.notifyViews();
+      this.renderStatus();
+      new Notice('已自动识别 Obsidian 内的微信读书登录态', 8000);
+    } catch {
+      /* 静默 */
+    }
+  }
+
+  /** 是否具备可用登录态：session 模式，或手动 Cookie 完整 */
+  hasLogin(): boolean {
+    if (this.settings.useSession) return true;
+    return checkCookie(normalizeCookie(this.settings.cookie || '')).ok;
+  }
+
   loginState(): 'none' | 'cookie' | 'full' {
     const ck = checkCookie(this.settings.cookie || '');
     const hasKey = /^wrk-/.test(this.settings.wereadApiKey || '');
@@ -870,8 +968,8 @@ export default class WereadMpCatcher extends Plugin {
   /** 用当前登录态换官方 API Key */
   async refreshApiKey(): Promise<string | null> {
     const ck = normalizeCookie(this.settings.cookie || '');
-    if (!checkCookie(ck).ok) return null;
-    const key = await fetchApiKey(this.llmHttp, ck);
+    if (!this.hasLogin()) return null;
+    const key = await fetchApiKey(this.http, ck);
     if (key) {
       this.settings.wereadApiKey = key;
       await this.saveAll();
@@ -879,11 +977,99 @@ export default class WereadMpCatcher extends Plugin {
     return key;
   }
 
+  /** 诊断登录态：把探测结果写进插件目录，便于定位 cookie/session 问题 */
+  async diagnoseLogin(): Promise<string> {
+    const out: string[] = [];
+    const stamp = new Date().toLocaleString('zh-CN');
+    out.push(`# 登录态诊断 ${stamp}`);
+
+    // 1) 插件里存的 cookie
+    const ck = normalizeCookie(this.settings.cookie || '');
+    const vid = (ck.split(';').map((x) => x.trim()).find((x) => x.startsWith('wr_vid=')) || '').slice(7);
+    out.push(`\n[1] 插件 cookie：${ck ? ck.split(';').length + ' 项' : '空'} · wr_vid=${vid || '(无)'}`);
+    out.push(`    checkCookie: ${JSON.stringify(checkCookie(ck))}`);
+    out.push(`    loginProfile: ${JSON.stringify(this.settings.loginProfile || null)}`);
+
+    // 2) Electron 能力探测
+    out.push('\n[2] Electron 能力：');
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      const req = (window as any).require;
+      out.push(`    require 存在: ${!!req}`);
+      const el = req?.('electron');
+      out.push(`    require('electron'): ${el ? Object.keys(el).slice(0, 12).join(',') : 'null'}`);
+      out.push(`    electron.remote: ${el?.remote ? 'ok' : 'null'}`);
+      try {
+        const r2 = req?.('@electron/remote');
+        out.push(`    @electron/remote: ${r2 ? 'ok' : 'null'}`);
+      } catch (e) {
+        out.push(`    @electron/remote: 抛错 ${String(e).slice(0, 60)}`);
+      }
+    } catch (e) {
+      out.push(`    探测异常: ${String(e).slice(0, 80)}`);
+    }
+
+    // 3) 带着插件 cookie 请求
+    const acc = this.settings.shelfAccounts[0] || this.settings.accounts[0];
+    if (acc?.bookId) {
+      const url = `https://weread.qq.com/web/mp/articles?bookId=${acc.bookId}&offset=0`;
+      const UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
+      out.push(`\n[3] 测号：${acc.name} ${acc.bookId}`);
+      try {
+        const a = await this.rawHttp(url, { Cookie: ck, 'User-Agent': UA, Referer: 'https://weread.qq.com/' });
+        out.push(`    带 Cookie: HTTP ${a.status} · ${a.text.slice(0, 120)}`);
+      } catch (e) {
+        out.push(`    带 Cookie 异常: ${String(e).slice(0, 80)}`);
+      }
+      try {
+        const b = await this.rawHttp(url, { 'User-Agent': UA, Referer: 'https://weread.qq.com/' });
+        out.push(`    不带 Cookie(session): HTTP ${b.status} · ${b.text.slice(0, 120)}`);
+      } catch (e) {
+        out.push(`    不带 Cookie 异常: ${String(e).slice(0, 80)}`);
+      }
+    }
+
+    // 4) 用户资料端点逐个试
+    out.push('\n[4] 用户资料端点：');
+    const UA2 = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
+    const cands = [
+      `https://weread.qq.com/web/user?userVid=${vid}`,
+      'https://weread.qq.com/api/user/info',
+      'https://weread.qq.com/api/user/profile',
+      'https://weread.qq.com/web/user?userVid=0',
+    ];
+    for (const u of cands) {
+      for (const withCookie of [true, false]) {
+        try {
+          const h: Record<string, string> = { 'User-Agent': UA2, Referer: 'https://weread.qq.com/', Accept: 'application/json' };
+          if (withCookie) h.Cookie = ck;
+          const r = await this.rawHttp(u, h);
+          out.push(`    ${u.replace('https://weread.qq.com', '')} ${withCookie ? '(cookie)' : '(session)'}: ${r.status} ${r.text.slice(0, 90)}`);
+        } catch (e) {
+          out.push(`    ${u.replace('https://weread.qq.com', '')}: 异常 ${String(e).slice(0, 50)}`);
+        }
+      }
+    }
+
+    const text = out.join('\n');
+    try {
+      await this.app.vault.adapter.write(`${this.manifest.dir}/诊断.txt`, text);
+    } catch {
+      /* 写失败不阻塞 */
+    }
+    new Notice('诊断已写入插件目录 诊断.txt', 8000);
+    return text;
+  }
+
   /** 拉登录用户资料（昵称 / 头像 / VID / 简介） */
   async refreshProfile(): Promise<LoginProfile | null> {
     const ck = normalizeCookie(this.settings.cookie || '');
-    if (!checkCookie(ck).ok) return null;
-    const p = await fetchProfile(this.http, ck);
+    if (!this.hasLogin()) return null;
+    let p = await fetchProfile(this.http, ck).catch(() => null);
+    if (!p || !p.name) {
+      // 切换账号后旧 cookie 的 vid 已失效，改用不依赖 vid 的端点
+      p = await fetchCurrentUser(this.http, ck).catch(() => null);
+    }
     if (p) {
       // 头像落地存插件目录，避免外链 CDN 被拦导致空白
       if (p.avatar) {
@@ -944,12 +1130,22 @@ export default class WereadMpCatcher extends Plugin {
     this.loginPolling = true;
     const t0 = Date.now();
     while (this.loginPolling && Date.now() - t0 < 6 * 60 * 1000) {
-      await sleep(3000);
+      await sleep(2500);
+      let ok = false;
+      // A) 老环境能直接读到 cookie
       const ck = await this.tryReadSessionCookie();
-      if (!ck) continue;
-      if (!checkCookie(ck).ok) continue;
-      this.settings.cookie = normalizeCookie(ck);
-      const key = await fetchApiKey(this.llmHttp, this.settings.cookie);
+      if (ck && checkCookie(ck).ok) {
+        this.settings.cookie = normalizeCookie(ck);
+        this.settings.useSession = false;
+        ok = true;
+      }
+      // B) 读不到 cookie（Obsidian 1.14 已移除 electron.remote）→ 请求探测 session 登录态
+      if (!ok && (await this.probeSessionLogin())) {
+        this.settings.useSession = true;
+        ok = true;
+      }
+      if (!ok) continue;
+      const key = await this.refreshApiKey();
       if (key) this.settings.wereadApiKey = key;
       await this.saveAll();
       this.loginPolling = false;
@@ -1335,7 +1531,7 @@ export default class WereadMpCatcher extends Plugin {
     signal: { stop: boolean },
   ): Promise<BfResult> {
     const cookie = normalizeCookie(this.settings.cookie || '');
-    if (!checkCookie(cookie).ok) return { written: 0, skipped: 0, failed: 0, stopped: true, error: '登录态无效，请重新扫码', items: [] };
+    if (!this.hasLogin()) return { written: 0, skipped: 0, failed: 0, stopped: true, error: '登录态无效，请重新扫码', items: [] };
     const client = new WereadClient(this.http, cookie);
     const T =
       opts.speed === 'slow'
@@ -1700,7 +1896,10 @@ class WMSettingTab extends PluginSettingTab {
 
     const loginSetting = new Setting(containerEl)
       .setName('扫码登录')
-      .setDesc('打开微信读书窗口扫码；完成后自动保存登录态、换出官方 API Key、同步书架公众号')
+      .setDesc(
+        '点本按钮弹出的窗口里扫码。注意：Obsidian 自带的「网页」标签页走独立会话，插件读不到那里的登录态。' +
+          '扫码完成后会自动保存登录态、换出官方 API Key、同步书架公众号并刷新界面。',
+      )
       .addButton((b) =>
         b
           .setButtonText(st === 'full' ? '重新扫码' : '扫码登录')
@@ -1718,6 +1917,13 @@ class WMSettingTab extends PluginSettingTab {
       );
     }
     loginSetting
+      .addButton((b) =>
+        b.setButtonText('重新读取登录态').onClick(async () => {
+          const r = await this.plugin.diagnoseLogin();
+          const first = r.split('\n').find((l) => l.includes('不带 Cookie')) || '';
+          new Notice(`诊断完成，已存 诊断.txt。${first.trim()}`, 12000);
+        }),
+      )
       .addButton((b) =>
         b.setButtonText('同步书架').onClick(async () => {
           const n = await this.plugin.syncAccountsFromShelf();

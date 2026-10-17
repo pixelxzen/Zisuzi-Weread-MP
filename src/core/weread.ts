@@ -78,6 +78,43 @@ export interface WereadProfile {
 }
 
 /** 登录用户资料（昵称/头像/简介）：GET /web/user?userVid=<wr_vid> */
+/**
+ * 拿「当前登录用户」的资料，不依赖 cookie 里的 wr_vid。
+ * 用于 session 自带登录态、但旧 cookie 里的 vid 已过期的场景（切换账号后）。
+ */
+export async function fetchCurrentUser(http: HttpFn, cookie: string): Promise<WereadProfile | null> {
+  const ck = normalizeCookie(cookie);
+  const cands = [
+    'https://weread.qq.com/api/user/info',
+    'https://weread.qq.com/api/user/profile',
+    'https://weread.qq.com/web/user?userVid=0',
+    'https://weread.qq.com/web/user?userVid=',
+  ];
+  for (const u of cands) {
+    try {
+      const r = await http(u, {
+        Cookie: ck,
+        'User-Agent': WEREAD_UA,
+        Referer: 'https://weread.qq.com/',
+        Accept: 'application/json, text/plain, */*',
+      });
+      if (r.status !== 200 || !r.text.trim().startsWith('{')) continue;
+      const j: any = JSON.parse(r.text);
+      const name = j?.name || j?.userName || j?.nickName || j?.user?.name;
+      if (!name) continue;
+      return {
+        name,
+        avatar: j?.avatar || j?.avatarUrl || j?.user?.avatar || '',
+        vid: String(j?.userVid ?? j?.vid ?? j?.user?.userVid ?? ''),
+        desc: j?.vDesc || j?.user?.vDesc || '',
+      };
+    } catch {
+      /* 试下一个 */
+    }
+  }
+  return null;
+}
+
 export async function fetchProfile(http: HttpFn, cookie: string): Promise<WereadProfile | null> {
   const ck = normalizeCookie(cookie);
   const vid = (ck.split(';').map((s) => s.trim()).find((s) => s.startsWith('wr_vid=')) || '').slice('wr_vid='.length);
