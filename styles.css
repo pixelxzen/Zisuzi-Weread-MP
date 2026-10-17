@@ -2553,6 +2553,106 @@
   opacity: 1;
 }
 
+
+/* ---------------------- 列表加载骨架屏（三态之一） ---------------------- */
+.wmc-skeleton-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: 14px;
+  padding: 4px 0;
+}
+
+.wmc-sk-card {
+  overflow: hidden;
+  border: 1px solid var(--wmc-line);
+  border-radius: 10px;
+  background: var(--wmc-raised);
+}
+
+.wmc-sk-cover {
+  aspect-ratio: 16 / 9;
+}
+
+.wmc-sk-body {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  padding: 10px 11px 13px;
+}
+
+.wmc-sk-line {
+  height: 9px;
+  border-radius: 4px;
+}
+
+.wmc-sk-line.is-lg {
+  width: 92%;
+  height: 11px;
+}
+
+.wmc-sk-line.is-sm {
+  width: 52%;
+}
+
+.wmc-sk-cover,
+.wmc-sk-line {
+  background-image: linear-gradient(
+    90deg,
+    color-mix(in srgb, var(--text-normal, #fff) 5%, transparent) 0%,
+    color-mix(in srgb, var(--text-normal, #fff) 13%, transparent) 50%,
+    color-mix(in srgb, var(--text-normal, #fff) 5%, transparent) 100%
+  );
+  background-size: 220% 100%;
+  animation: wmc-shimmer 1.5s ease-in-out infinite;
+}
+
+@keyframes wmc-shimmer {
+  0% {
+    background-position: 220% 0;
+  }
+  100% {
+    background-position: -220% 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .wmc-sk-cover,
+  .wmc-sk-line {
+    animation: none;
+  }
+}
+
+/* ------------------------ 设置页排版（防挤压） ------------------------ */
+.wmc-settings .setting-item {
+  flex-wrap: wrap;
+  row-gap: 8px;
+}
+
+.wmc-settings .setting-item-control {
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+.wmc-settings .setting-item-description {
+  line-height: 1.65;
+  max-width: 42em;
+}
+
+.wmc-settings .wmc-adv {
+  margin: 10px 0 4px;
+  padding: 8px 12px;
+  border: 1px solid var(--wmc-line);
+  border-radius: var(--wmc-r-md, 8px);
+  background: color-mix(in srgb, var(--text-normal, #fff) 3%, transparent);
+}
+
+.wmc-settings .wmc-adv summary {
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
 /* ---------------------------------- menu --------------------------------- */
 
 .wmc-menu {

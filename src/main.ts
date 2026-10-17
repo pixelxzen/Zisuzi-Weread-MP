@@ -1896,10 +1896,7 @@ class WMSettingTab extends PluginSettingTab {
 
     const loginSetting = new Setting(containerEl)
       .setName('扫码登录')
-      .setDesc(
-        '点本按钮弹出的窗口里扫码。注意：Obsidian 自带的「网页」标签页走独立会话，插件读不到那里的登录态。' +
-          '扫码完成后会自动保存登录态、换出官方 API Key、同步书架公众号并刷新界面。',
-      )
+      .setDesc('点「重新扫码」，在弹出窗口里扫码即可。Obsidian 内置网页标签走独立会话，插件读不到。')
       .addButton((b) =>
         b
           .setButtonText(st === 'full' ? '重新扫码' : '扫码登录')
@@ -1918,13 +1915,6 @@ class WMSettingTab extends PluginSettingTab {
     }
     loginSetting
       .addButton((b) =>
-        b.setButtonText('重新读取登录态').onClick(async () => {
-          const r = await this.plugin.diagnoseLogin();
-          const first = r.split('\n').find((l) => l.includes('不带 Cookie')) || '';
-          new Notice(`诊断完成，已存 诊断.txt。${first.trim()}`, 12000);
-        }),
-      )
-      .addButton((b) =>
         b.setButtonText('同步书架').onClick(async () => {
           const n = await this.plugin.syncAccountsFromShelf();
           new Notice(n ? `已同步 ${n} 个公众号` : '同步失败：先完成扫码登录');
@@ -1939,7 +1929,11 @@ class WMSettingTab extends PluginSettingTab {
 
     // 高级：手动 Cookie（渐进展开，不占视觉）
     const adv = containerEl.createEl('details', { cls: 'wmc-adv' });
-    adv.createEl('summary', { text: '高级：手动 Cookie（一般不需要）' });
+    adv.createEl('summary', { text: '高级：手动 Cookie / 诊断' });
+    new Setting(adv)
+      .setName('诊断登录态')
+      .setDesc('把 cookie 与 Obsidian session 的探测结果写入插件目录 诊断.txt')
+      .addButton((b) => b.setButtonText('运行诊断').onClick(() => void this.plugin.diagnoseLogin()));
     new Setting(adv)
       .setName('Cookie')
       .setDesc('仅当扫码取不到登录态时使用；四项齐全才不会报 -2012')

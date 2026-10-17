@@ -21,6 +21,8 @@ export interface RowItem {
   summary?: string;
 }
 
+const ORB_FRAMES = ['✽', '✻', '✶', '✢', '·'];
+
 type Mode = 'list' | 'detail' | 'stats' | 'agent';
 type Tab = 'body' | 'ai' | 'agent' | 'origin';
 type Layout = 'card' | 'feed' | 'official' | 'compact';
@@ -81,6 +83,7 @@ export class WmcView extends ItemView {
   private scrollMemory = 0;
   private sideQuery = '';
   private synced = new Set<string>();
+  private listLoading = false;
 
   private get panelOpen(): boolean {
     return !!this.plugin.settings.panelOpen;
@@ -275,7 +278,19 @@ export class WmcView extends ItemView {
       this.render();
     });
 
-    this.iconBtn(bar, 'refresh-cw', '抓取一轮', () => void this.plugin.runOnce(true).then(() => this.render()), true);
+    const grabBtn = this.iconBtn(bar, 'refresh-cw', '抓取一轮', () => {
+      void (async () => {
+        if (grabBtn.hasClass('is-syncing')) return;
+        const orbCtl = this.mountOrb(grabBtn);
+        orbCtl.start();
+        try {
+          await this.plugin.runOnce(true);
+        } finally {
+          orbCtl.stop();
+          this.render();
+        }
+      })();
+    }, true);
     this.iconBtn(bar, 'archive', '归档某个号的全部历史', () =>
       new BackfillModal(this.app, this.plugin, this.account || undefined).open(),
     );
@@ -578,6 +593,32 @@ export class WmcView extends ItemView {
     new Notice(on ? `已选中 ${accounts.length} 个号` : `已清空 ${accounts.length} 个号`);
   }
 
+  /** 给按钮挂一个 LoadingOrb（字符轮转），返回控制函数 */
+  private mountOrb(btn: HTMLElement): { start: () => void; stop: () => void } {
+    const orb = btn.createSpan({ cls: 'wmc-orb' });
+    for (const f of ORB_FRAMES) orb.createEl('i', { text: f });
+    const nodes = Array.from(orb.querySelectorAll('i'));
+    let timer: number | undefined;
+    let k = 0;
+    const start = () => {
+      if (timer !== undefined) return;
+      btn.addClass('is-syncing');
+      const tick = () => {
+        nodes.forEach((n, i) => n.classList.toggle('is-on', i === k % nodes.length));
+        k++;
+      };
+      tick();
+      timer = window.setInterval(tick, 180);
+    };
+    const stop = () => {
+      if (timer !== undefined) window.clearInterval(timer);
+      timer = undefined;
+      btn.removeClass('is-syncing');
+      nodes.forEach((n, i) => n.classList.toggle('is-on', i === 0));
+    };
+    return { start, stop };
+  }
+
   private iconBtn(parent: HTMLElement, icon: string, label: string, onClick: () => void, cta = false): HTMLElement {
     const b = parent.createEl('button', { cls: `wmc-icon-btn${cta ? ' is-cta' : ''}` });
     setIcon(b, icon);
@@ -588,6 +629,19 @@ export class WmcView extends ItemView {
   }
 
   /* ------------------------------ 列表 ------------------------------ */
+
+  /** 列表加载中骨架屏（纯 CSS shimmer，三态：加载中 / 有内容 / 空态） */
+  private renderSkeleton(parent: HTMLElement, count = 6): void {
+    const grid = parent.createDiv('wmc-skeleton-grid');
+    for (let i = 0; i < count; i++) {
+      const card = grid.createDiv('wmc-sk-card');
+      card.createDiv('wmc-sk-cover');
+      const body = card.createDiv('wmc-sk-body');
+      body.createDiv('wmc-sk-line is-lg');
+      body.createDiv('wmc-sk-line');
+      body.createDiv('wmc-sk-line is-sm');
+    }
+  }
 
   private renderList(): void {
     const root = this.contentEl;
@@ -603,6 +657,11 @@ export class WmcView extends ItemView {
     this.statbar(main, rows);
     this.watchbar(main);
     if (this.panelOpen) this.renderPanel(main);
+
+    if (this.listLoading && !rows.length) {
+      this.renderSkeleton(main, 6);
+      return;
+    }
 
     if (!rows.length) {
       this.renderEmpty(main);
@@ -812,29 +871,17 @@ export class WmcView extends ItemView {
     setIcon(syncBtn, 'refresh-cw');
     syncBtn.setAttr('title', '同步最新（只拉新文章，不动已存历史）');
     // LoadingOrb：Claude Code 用的字符轮转，5 帧叠在同一位置只切透明度，字符不抖动
-    const orb = syncBtn.createSpan({ cls: 'wmc-orb' });
-    const FRAMES = ['✽', '✻', '✶', '✢', '·'];
-    for (const f of FRAMES) orb.createEl('i', { text: f });
     syncBtn.addEventListener('click', async () => {
       if (!this.account) {
         new Notice('先在左栏选一个公众号');
         return;
       }
       if (syncBtn.hasClass('is-syncing')) return;
-      syncBtn.addClass('is-syncing');
+      const orbCtl = this.mountOrb(syncBtn);
+      orbCtl.start();
       syncBtn.setAttr('title', '同步中…');
-      const nodes = Array.from(orb.querySelectorAll('i'));
-      let k = 0;
-      const tick = () => {
-        nodes.forEach((n, i) => n.classList.toggle('is-on', i === k % nodes.length));
-        k++;
-      };
-      tick();
-      const timer = window.setInterval(tick, 180);
       const n = await this.plugin.syncNewArticles(this.account, 20).catch(() => 0);
-      window.clearInterval(timer);
-      nodes.forEach((n, i) => n.classList.toggle('is-on', i === 0));
-      syncBtn.removeClass('is-syncing');
+      orbCtl.stop();
       syncBtn.setAttr('title', '同步最新（只拉新文章，不动已存历史）');
       new Notice(n > 0 ? `「${this.account}」新增 ${n} 篇` : '没有新文章');
       if (n > 0) this.renderList();
@@ -885,7 +932,12 @@ export class WmcView extends ItemView {
         if (!name) return;
         const hasCache = this.allRows().some((r) => r.account === name);
         if (!hasCache) {
-          void this.plugin.fetchAccountList(name); // 首次打开：拉首屏
+          this.listLoading = true;
+          this.renderList(); // 先出骨架屏
+          void this.plugin.fetchAccountList(name).finally(() => {
+            this.listLoading = false;
+            this.renderList();
+          });
           return;
         }
         // 有缓存 → 后台只拉最新几页做增量，遇到已知就停
