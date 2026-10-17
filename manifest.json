@@ -1,7 +1,7 @@
 {
   "id": "zisuzi-weread-mp",
   "name": "紫苏子 · 微信读书公众号",
-  "version": "3.3.0",
+  "version": "3.4.3",
   "minAppVersion": "1.4.0",
   "description": "登录微信读书后，自动盯采书架里订阅的公众号更新，归档为 Obsidian 笔记（含图片本地化）。",
   "author": "紫苏子ACG",

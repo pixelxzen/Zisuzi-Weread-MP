@@ -38,6 +38,7 @@ export class BackfillModal extends Modal {
   private running = false;
 
   private progEl: HTMLElement | null = null;
+  private stopBtn: HTMLButtonElement | null = null;
   private listEl: HTMLElement | null = null;
   private startedAt = 0;
   private items: BfItem[] = [];
@@ -64,23 +65,21 @@ export class BackfillModal extends Modal {
     const ht = head.createDiv('wmc-bf-head-txt');
     ht.createDiv({ cls: 'wmc-bf-h1', text: '归档全部历史' });
     ht.createDiv({ cls: 'wmc-bf-h2', text: '把一个号的历史文章抓进知识库' });
-    const x = head.createEl('button', { cls: 'wmc-bf-x' });
-    setIcon(x, 'x');
-    x.setAttr('aria-label', '关闭');
-    x.addEventListener('click', () => this.close());
+    this.modalEl.addClass('has-close');
 
-    /* --------------------------- 表单：左标签右控件 --------------------------- */
-    const form = contentEl.createDiv('wmc-bf-form');
+    /* ---------------------------- 组 1：抓取范围 ---------------------------- */
+    const g1 = contentEl.createDiv('wmc-bf-group');
+    g1.createDiv({ cls: 'wmc-bf-sec', text: '抓取范围' });
+    const f1 = g1.createDiv('wmc-bf-form');
 
-    const row = (label: string, hint?: string): HTMLElement => {
-      form.createDiv({ cls: 'wmc-bf-key', text: label });
-      const val = form.createDiv('wmc-bf-val');
-      if (hint) val.createDiv({ cls: 'wmc-bf-hint', text: hint });
-      return val;
+    const row = (parent: HTMLElement, label: string): HTMLElement => {
+      parent.createDiv({ cls: 'wmc-bf-key', text: label });
+      return parent.createDiv('wmc-bf-val');
     };
+    const addHint = (val: HTMLElement, text: string) => val.createDiv({ cls: 'wmc-bf-hint', text });
 
     // 公众号 —— select 自绘箭头
-    const accVal = row('公众号');
+    const accVal = row(f1, '公众号');
     const selWrap = accVal.createDiv('wmc-bf-select-wrap');
     const sel = selWrap.createEl('select', { cls: 'wmc-bf-select' });
     for (const a of this.accounts) sel.createEl('option', { value: a.name, text: a.name });
@@ -94,8 +93,31 @@ export class BackfillModal extends Modal {
       this.listEl?.empty();
     });
 
-    // 单批上限
-    const batchVal = row('单批上限', '≤30 篇/批，批间隔 ≥10 分钟');
+    // 起始日期（文本输入，避免原生三段 spinner）
+    const dateVal = row(f1, '从哪天起');
+    const dInput = dateVal.createEl('input', {
+      cls: 'wmc-bf-input is-date',
+      type: 'text',
+      attr: { placeholder: 'YYYY-MM-DD，可留空' },
+    });
+    dInput.addEventListener('change', () => {
+      const v = dInput.value.trim();
+      if (v && !/^\d{4}-\d{2}-\d{2}$/.test(v)) {
+        new Notice('日期格式要写成 2026-01-01 这样');
+        dInput.value = '';
+        this.fromDate = '';
+        return;
+      }
+      this.fromDate = v;
+    });
+    addHint(dateVal, '留空 = 从最新往回抓');
+
+    /* ---------------------------- 组 2：抓取节奏 ---------------------------- */
+    const g2 = contentEl.createDiv('wmc-bf-group');
+    g2.createDiv({ cls: 'wmc-bf-sec', text: '抓取节奏' });
+    const f2 = g2.createDiv('wmc-bf-form');
+
+    const batchVal = row(f2, '单批上限');
     const batchLine = batchVal.createDiv('wmc-bf-inline');
     const bInput = batchLine.createEl('input', { cls: 'wmc-bf-input is-num', type: 'number' });
     bInput.value = String(this.maxItems);
@@ -106,14 +128,9 @@ export class BackfillModal extends Modal {
       const n = Number(bInput.value);
       if (Number.isFinite(n) && n > 0) this.maxItems = Math.min(500, Math.round(n));
     });
+    addHint(batchVal, '建议 ≤30 篇，跑完隔 10 分钟再下一批');
 
-    // 起始日期
-    const dateVal = row('起始日期', '留空 = 从最新往回抓');
-    const dInput = dateVal.createEl('input', { cls: 'wmc-bf-input', type: 'date' });
-    dInput.addEventListener('change', () => (this.fromDate = dInput.value));
-
-    // 速度：iOS 式 segmented control
-    const spdVal = row('速度');
+    const spdVal = row(f2, '速度');
     const seg = spdVal.createDiv('wmc-bf-seg');
     const mkSeg = (v: 'safe' | 'slow', label: string, sub: string) => {
       const b = seg.createEl('button', { cls: `wmc-bf-seg-btn${this.speed === v ? ' is-on' : ''}` });
@@ -126,27 +143,36 @@ export class BackfillModal extends Modal {
           .forEach((el, i) => el.toggleClass('is-on', i === (v === 'safe' ? 0 : 1)));
       });
     };
-    mkSeg('safe', '安全', '1.2s · 2.5s · 15 休 60s');
-    mkSeg('slow', '极保守', '3s · 6s · 10 休 120s');
+    mkSeg('safe', '安全（默认）', '1.2s / 2.5s / 15 休 60s');
+    mkSeg('slow', '极保守', '3s / 6s / 10 休 120s');
+    addHint(spdVal, '越保守越不容易被风控，也越慢');
 
-    /* --------------------------------- 提示条 -------------------------------- */
-    const warn = contentEl.createDiv('wmc-bf-warn');
+    /* ---------------------------- 组 3：风控说明 ---------------------------- */
+    const g3 = contentEl.createDiv('wmc-bf-group');
+    const warn = g3.createDiv('wmc-bf-warn');
     const wi = warn.createSpan('wmc-bf-warn-ico');
     setIcon(wi, 'shield-alert');
     warn.createSpan({
-      text: '命中风控码立即停止且不重试；被拦后等几小时（严重时一天）再继续。',
+      text: '命中风控码会立即停止且不重试。被拦后等几小时（严重时一天）再继续。',
     });
 
-    /* ---------------------------------- 进度 --------------------------------- */
-    this.progEl = contentEl.createDiv('wmc-bf-prog');
+    /* ------------------------------ 组 4：进度 ------------------------------ */
+    const g4 = contentEl.createDiv('wmc-bf-group');
+    g4.createDiv({ cls: 'wmc-bf-sec', text: '进度' });
+    this.progEl = g4.createDiv('wmc-bf-prog');
     this.renderProgIdle();
 
-    /* ---------------------------------- 列表 --------------------------------- */
-    this.listEl = contentEl.createDiv('wmc-bf-list');
+    /* ---------------------------- 组 5：文章明细 ---------------------------- */
+    const g5 = contentEl.createDiv('wmc-bf-group');
+    g5.createDiv({ cls: 'wmc-bf-sec', text: '文章明细' });
+    this.listEl = g5.createDiv('wmc-bf-list');
+    this.renderItems();
 
     /* ---------------------------------- 底部 --------------------------------- */
     const foot = contentEl.createDiv('wmc-bf-foot');
     const stop = foot.createEl('button', { cls: 'wmc-bf-btn', text: '停止' });
+    stop.disabled = true;
+    this.stopBtn = stop;
     stop.addEventListener('click', () => {
       this.signal.stop = true;
       new Notice('已请求停止（当前这篇抓完后停）');
@@ -164,7 +190,8 @@ export class BackfillModal extends Modal {
     const meta = top.createDiv('wmc-bf-prog-meta');
     meta.createDiv({ cls: 'wmc-bf-prog-main', text: '等待开始' });
     const bar = el.createDiv('wmc-bf-bar');
-    bar.createDiv('wmc-bf-bar-fill');
+    const f = bar.createDiv('wmc-bf-bar-fill');
+    f.style.width = '0%';
   }
 
   private async start(only?: string[]): Promise<void> {
@@ -176,6 +203,7 @@ export class BackfillModal extends Modal {
     }
     this.running = true;
     this.signal.stop = false;
+    if (this.stopBtn) this.stopBtn.disabled = false;
     this.startedAt = Date.now();
     this.items = [];
     this.listEl?.empty();
@@ -189,6 +217,7 @@ export class BackfillModal extends Modal {
     );
 
     this.running = false;
+    if (this.stopBtn) this.stopBtn.disabled = true;
     this.items = res.items;
     this.renderProgress({
       phase: 'fetch',
@@ -285,7 +314,7 @@ export class BackfillModal extends Modal {
     if (!el) return;
     el.empty();
     if (!this.items.length) {
-      el.createDiv({ cls: 'wmc-bf-list-empty', text: '还没有任务' });
+      el.createDiv({ cls: 'wmc-bf-list-empty', text: '点「开始归档」后，这里会逐篇显示每篇的状态' });
       return;
     }
     for (const it of this.items) {
