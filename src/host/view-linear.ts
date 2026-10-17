@@ -13,6 +13,7 @@ export interface RowItem {
   readNum?: number;
   likeNum?: number;
   picUrl?: string;
+  localCover?: string;
   archived: boolean;
   path?: string;
   read: boolean;
@@ -70,6 +71,15 @@ export class WmcView extends ItemView {
   private filling = false;
   private unsubWatch: (() => void) | null = null;
   private logOpen = false;
+  private panelQuery = '';
+
+  private get panelOpen(): boolean {
+    return !!this.plugin.settings.panelOpen;
+  }
+  private set panelOpen(v: boolean) {
+    this.plugin.settings.panelOpen = v;
+    void this.plugin.saveAll();
+  }
 
   constructor(leaf: WorkspaceLeaf, plugin: WereadMpCatcher) {
     super(leaf);
@@ -129,7 +139,7 @@ export class WmcView extends ItemView {
     const out: RowItem[] = [];
     const push = (
       rid: string,
-      d: { account: string; title: string; time: number; readNum?: number; likeNum?: number; picUrl?: string },
+      d: { account: string; title: string; time: number; readNum?: number; likeNum?: number; picUrl?: string; localCover?: string },
     ) => {
       const done = processed[rid];
       out.push({
@@ -140,6 +150,7 @@ export class WmcView extends ItemView {
         readNum: d.readNum,
         likeNum: d.likeNum,
         picUrl: d.picUrl,
+        localCover: d.localCover,
         archived: !!done,
         path: done?.path,
         read: !!readMap[rid],
@@ -224,6 +235,11 @@ export class WmcView extends ItemView {
     title.setText(this.mode === 'list' ? '微信读书公众号' : this.mode === 'stats' ? '盯采统计' : '文章');
 
     bar.createDiv('wmc-spacer').style.flex = '1';
+
+    this.iconBtn(bar, 'radar', this.panelOpen ? '关闭盯采管理' : '盯采管理', () => {
+      this.panelOpen = !this.panelOpen;
+      this.render();
+    });
 
     this.iconBtn(bar, 'refresh-cw', '抓取一轮', () => void this.plugin.runOnce(true).then(() => this.render()), true);
     this.iconBtn(bar, 'archive', '归档某个号的全部历史', () =>
@@ -390,6 +406,109 @@ export class WmcView extends ItemView {
     text.setText(t);
   }
 
+  /* ------------------------- 盯采管理面板（抽屉） ------------------------- */
+
+  private renderPanel(root: HTMLElement): void {
+    const panel = root.createDiv('wmc-panel');
+    const head = panel.createDiv('wmc-panel-head');
+    head.createSpan({ cls: 'wmc-panel-title', text: '盯采管理' });
+    const watchedCount = this.plugin.settings.accounts.length;
+    head.createSpan({ cls: 'wmc-panel-count', text: `${watchedCount} 个号` });
+    const close = head.createEl('button', { cls: 'wmc-icon-btn' });
+    setIcon(close, 'x');
+    close.setAttr('title', '关闭');
+    close.addEventListener('click', () => {
+      this.panelOpen = false;
+      this.render();
+    });
+
+    const searchRow = panel.createDiv('wmc-panel-search');
+    const sInput = searchRow.createEl('input', { type: 'search', placeholder: '搜索公众号…' });
+    sInput.value = this.panelQuery;
+    sInput.addEventListener('input', () => {
+      this.panelQuery = sInput.value.trim();
+      this.refreshPanelList();
+    });
+
+    const batch = panel.createDiv('wmc-panel-batch');
+    const selAll = batch.createEl('button', { cls: 'wmc-panel-btn', text: '全选结果' });
+    selAll.addEventListener('click', () => this.panelSelectAll(true));
+    const clear = batch.createEl('button', { cls: 'wmc-panel-btn', text: '清空' });
+    clear.addEventListener('click', () => this.panelSelectAll(false));
+
+    const list = panel.createDiv('wmc-panel-list');
+    this.renderPanelList(list);
+  }
+
+  private panelAccounts(): Array<{ name: string; bookId: string }> {
+    const shelf = this.plugin.settings.shelfAccounts;
+    const q = this.panelQuery.toLowerCase();
+    if (!q) return shelf;
+    return shelf.filter((a) => a.name.toLowerCase().includes(q));
+  }
+
+  private renderPanelList(list: HTMLElement): void {
+    list.empty();
+    const accounts = this.panelAccounts();
+    const watched = new Set(this.plugin.settings.accounts.map((a) => a.bookId));
+    for (const acc of accounts) {
+      const row = list.createDiv('wmc-panel-row');
+      const cb = row.createEl('input', { type: 'checkbox' });
+      cb.checked = watched.has(acc.bookId);
+      cb.addEventListener('change', () => this.toggleWatch(acc, cb.checked));
+      row.createSpan({ cls: 'wmc-panel-name', text: acc.name });
+      const last = this.lastTimeFor(acc.name);
+      if (last) row.createSpan({ cls: 'wmc-panel-time', text: last });
+    }
+    if (!accounts.length) {
+      list.createDiv({ cls: 'wmc-hint', text: '没有匹配的公众号。' });
+    }
+  }
+
+  private refreshPanelList(): void {
+    const list = this.contentEl.querySelector('.wmc-panel-list') as HTMLElement | null;
+    if (list) this.renderPanelList(list);
+  }
+
+  private lastTimeFor(account: string): string {
+    let max = 0;
+    for (const r of this.allRows()) {
+      if (r.account === account && r.time > max) max = r.time;
+    }
+    if (!max) return '';
+    const diff = Date.now() - max * 1000;
+    if (diff < 3600_000) return `${Math.max(1, Math.floor(diff / 60000))} 分钟前`;
+    if (diff < 86400_000) return `${Math.floor(diff / 3600000)} 小时前`;
+    return `${Math.floor(diff / 86400000)} 天前`;
+  }
+
+  private toggleWatch(acc: { name: string; bookId: string }, on: boolean): void {
+    if (on) {
+      if (!this.plugin.settings.accounts.some((a) => a.bookId === acc.bookId)) {
+        this.plugin.settings.accounts.push(acc);
+      }
+    } else {
+      this.plugin.settings.accounts = this.plugin.settings.accounts.filter((a) => a.bookId !== acc.bookId);
+    }
+    void this.plugin.saveAll();
+  }
+
+  private panelSelectAll(on: boolean): void {
+    const accounts = this.panelAccounts();
+    if (on) {
+      const existing = new Set(this.plugin.settings.accounts.map((a) => a.bookId));
+      for (const a of accounts) {
+        if (!existing.has(a.bookId)) this.plugin.settings.accounts.push(a);
+      }
+    } else {
+      const ids = new Set(accounts.map((a) => a.bookId));
+      this.plugin.settings.accounts = this.plugin.settings.accounts.filter((a) => !ids.has(a.bookId));
+    }
+    void this.plugin.saveAll();
+    this.refreshPanelList();
+    new Notice(on ? `已选中 ${accounts.length} 个号` : `已清空 ${accounts.length} 个号`);
+  }
+
   private iconBtn(parent: HTMLElement, icon: string, label: string, onClick: () => void, cta = false): HTMLElement {
     const b = parent.createEl('button', { cls: `wmc-icon-btn${cta ? ' is-cta' : ''}` });
     setIcon(b, icon);
@@ -409,6 +528,7 @@ export class WmcView extends ItemView {
     const rows = this.rows();
     this.statbar(root, rows);
     this.watchbar(root);
+    if (this.panelOpen) this.renderPanel(root);
 
     if (!rows.length) {
       const e = root.createDiv('wmc-empty');
@@ -479,13 +599,25 @@ export class WmcView extends ItemView {
     });
   }
 
+  private coverSrc(r: RowItem): string | null {
+    if (r.localCover) {
+      try {
+        return this.app.vault.adapter.getResourcePath(r.localCover);
+      } catch {
+        /* 回退外链 */
+      }
+    }
+    return r.picUrl || null;
+  }
+
   private card(r: RowItem): HTMLElement {
     const card = createEl('div', { cls: 'wmc-card' });
     if (r.read) card.addClass('is-read');
     const cover = card.createDiv('wmc-card-cover');
-    if (r.picUrl) {
+    const src = this.coverSrc(r);
+    if (src) {
       const img = cover.createEl('img');
-      img.src = r.picUrl;
+      img.src = src;
       img.loading = 'lazy';
       img.referrerPolicy = 'no-referrer';
       img.addEventListener('error', () => img.remove());
@@ -505,10 +637,11 @@ export class WmcView extends ItemView {
   }
 
   private feedItem(r: RowItem): HTMLElement {
-    const el = createEl('div', { cls: `wmc-feed-item${r.picUrl ? ' has-img' : ''}${r.read ? ' is-read' : ''}` });
-    if (r.picUrl) {
+    const src = this.coverSrc(r);
+    const el = createEl('div', { cls: `wmc-feed-item${src ? ' has-img' : ''}${r.read ? ' is-read' : ''}` });
+    if (src) {
       const img = el.createEl('img', { cls: 'wmc-feed-img' });
-      img.src = r.picUrl;
+      img.src = src;
       img.loading = 'lazy';
       img.referrerPolicy = 'no-referrer';
       img.addEventListener('error', () => img.remove());
@@ -527,9 +660,10 @@ export class WmcView extends ItemView {
   private officialRow(r: RowItem): HTMLElement {
     const row = createEl('div', { cls: `wmc-off-row${r.read ? ' is-read' : ''}` });
     const thumb = row.createDiv('wmc-off-thumb');
-    if (r.picUrl) {
+    const src = this.coverSrc(r);
+    if (src) {
       const img = thumb.createEl('img');
-      img.src = r.picUrl;
+      img.src = src;
       img.loading = 'lazy';
       img.referrerPolicy = 'no-referrer';
       img.addEventListener('error', () => img.remove());

@@ -60,6 +60,7 @@ export interface WMSettings {
   layout: 'card' | 'feed' | 'official' | 'compact';
   theme: 'linear' | 'brand';
   maxMediaMB: number;
+  panelOpen: boolean;
   outputDir: string;
   listWidth: number;
   llm: LLMSettings;
@@ -88,6 +89,7 @@ interface DiscoveredEntry {
   readNum?: number;
   likeNum?: number;
   picUrl?: string;
+  localCover?: string;
 }
 
 interface WMState {
@@ -108,6 +110,7 @@ const DEFAULTS: WMSettings = {
   layout: 'card',
   theme: 'linear',
   maxMediaMB: 50,
+  panelOpen: false,
   outputDir: '微信读书公众号',
   listWidth: 300,
   llm: { ...LLM_DEFAULTS },
@@ -575,11 +578,11 @@ export default class WereadMpCatcher extends Plugin {
           const fresh = items.filter((it) => !this.state.processed[it.reviewId]);
           found += fresh.length;
           this.watch.found = found;
-          // 记入发现清单，供列表页展示（含未归档条目）
+          // 记入发现清单，供列表页展示（含未归档条目）；封面顺手本地化，防外链被拦
           if (!this.state.discovered) this.state.discovered = {};
           for (const it of items) {
             if (!this.state.discovered[it.reviewId]) {
-              this.state.discovered[it.reviewId] = {
+              const entry: DiscoveredEntry = {
                 account: acc.name,
                 title: it.title,
                 time: it.time,
@@ -587,6 +590,21 @@ export default class WereadMpCatcher extends Plugin {
                 likeNum: it.likeNum,
                 picUrl: it.picUrl,
               };
+              this.state.discovered[it.reviewId] = entry;
+              if (it.picUrl && this.settings.downloadImages) {
+                try {
+                  const buf = await client.fetchImage(it.picUrl);
+                  const ext = guessExt(buf);
+                  const cdir = normalizePath(`${this.settings.outputDir}/assets/covers`);
+                  await this.ensureFolder(cdir);
+                  const rel = normalizePath(`${cdir}/${it.reviewId}.${ext}`);
+                  await this.app.vault.adapter.writeBinary(rel, buf);
+                  entry.localCover = rel;
+                } catch {
+                  /* 封面失败不阻塞列表 */
+                }
+                await sleep(250);
+              }
             }
           }
           queueByAccount.push({ acc, items: fresh.slice(0, this.settings.maxPerAccount) });
