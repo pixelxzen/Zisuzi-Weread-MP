@@ -1,11 +1,23 @@
 import { App, Modal, Notice, Setting, setIcon } from 'obsidian';
 import type WereadMpCatcher from '../main';
 import type { AccountRef } from '../main';
+import type { BfItem, BfState } from '../core/bf';
 
 /**
  * 单号全量历史归档
+ * - 逐篇状态可见：待抓 / 抓取中 / 已归档 / 已归档(跳过) / 失败
+ * - 网络抖动自动重试 1 次并在行内标出「重试 1/2」
+ * - 风控码立即熔断，不做自动重试
  * 风控参数与建议来自 weread-mp-monitor skill 的实测结论。
  */
+const ICON: Record<BfState, string> = {
+  pending: 'circle',
+  running: 'loader',
+  done: 'check-circle-2',
+  failed: 'alert-triangle',
+  skipped: 'minus-circle',
+};
+
 export class BackfillModal extends Modal {
   private plugin: WereadMpCatcher;
   private accounts: AccountRef[];
@@ -15,7 +27,12 @@ export class BackfillModal extends Modal {
   private speed: 'safe' | 'slow' = 'safe';
   private signal = { stop: false };
   private running = false;
+
   private bodyEl: HTMLElement | null = null;
+  private listEl: HTMLElement | null = null;
+  private sumEl: HTMLElement | null = null;
+  private fillEl: HTMLElement | null = null;
+  private items: BfItem[] = [];
 
   constructor(app: App, plugin: WereadMpCatcher, preset?: string) {
     super(app);
@@ -30,13 +47,15 @@ export class BackfillModal extends Modal {
     contentEl.addClass('wmc-backfill');
     contentEl.createEl('h3', { text: '归档某个号的全部历史' });
 
-    new Setting(contentEl)
-      .setName('公众号')
-      .addDropdown((d) => {
-        for (const a of this.accounts) d.addOption(a.name, a.name);
-        if (this.picked) d.setValue(this.picked);
-        d.onChange((v) => (this.picked = v));
+    new Setting(contentEl).setName('公众号').addDropdown((d) => {
+      for (const a of this.accounts) d.addOption(a.name, a.name);
+      if (this.picked) d.setValue(this.picked);
+      d.onChange((v) => {
+        this.picked = v;
+        this.items = [];
+        this.bodyEl?.empty();
       });
+    });
 
     new Setting(contentEl)
       .setName('单批上限')
@@ -77,12 +96,7 @@ export class BackfillModal extends Modal {
     this.bodyEl = contentEl.createDiv('wmc-backfill-body');
 
     new Setting(contentEl)
-      .addButton((b) =>
-        b
-          .setButtonText('开始归档')
-          .setCta()
-          .onClick(() => void this.start()),
-      )
+      .addButton((b) => b.setButtonText('开始归档').setCta().onClick(() => void this.start()))
       .addButton((b) =>
         b.setButtonText('停止').onClick(() => {
           this.signal.stop = true;
@@ -91,7 +105,7 @@ export class BackfillModal extends Modal {
       );
   }
 
-  private async start(): Promise<void> {
+  private async start(only?: string[]): Promise<void> {
     if (this.running) return;
     const acc = this.accounts.find((a) => a.name === this.picked);
     if (!acc) {
@@ -105,36 +119,91 @@ export class BackfillModal extends Modal {
     box.empty();
 
     const bar = box.createDiv('wmc-progress');
-    const fill = bar.createDiv('wmc-progress-fill');
-    const label = box.createDiv('wmc-progress-label');
-    label.setText('翻列表中…');
+    this.fillEl = bar.createDiv('wmc-progress-fill');
+    this.sumEl = box.createDiv('wmc-bf-sum');
+    this.sumEl.setText(only ? '重新抓取失败项…' : '翻列表中…');
+    this.listEl = box.createDiv('wmc-bf-list');
 
     const res = await this.plugin.runBackfill(
       acc,
-      { maxItems: this.maxItems, fromDate: this.fromDate, speed: this.speed },
+      { maxItems: this.maxItems, fromDate: this.fromDate, speed: this.speed, only },
       (p) => {
+        this.items = p.items;
+        if (p.phase === 'list') {
+          this.sumEl?.setText(`翻列表中 · ${p.detail ?? ''}`);
+          if (this.fillEl) this.fillEl.style.width = '4%';
+          return;
+        }
+        const done = p.items.filter((i) => i.state === 'done').length;
+        const failed = p.items.filter((i) => i.state === 'failed').length;
+        const skip = p.items.filter((i) => i.state === 'skipped').length;
         const pct = p.total ? Math.round((p.done / p.total) * 100) : 0;
-        fill.style.width = `${Math.min(100, pct)}%`;
-        label.setText(
-          p.phase === 'list'
-            ? `翻列表：${p.title ?? ''}`
-            : `已归档 ${p.written} / ${p.total} · ${(p.title ?? '').slice(0, 28)}`,
+        if (this.fillEl) this.fillEl.style.width = `${Math.min(100, pct)}%`;
+        this.sumEl?.setText(
+          `进度 ${p.done}/${p.total} · ✅ 已归档 ${done}` +
+            (skip ? ` · ⤼ 已存在 ${skip}` : '') +
+            (failed ? ` · ⚠️ 失败 ${failed}` : ''),
         );
+        this.renderItems();
       },
       this.signal,
     );
 
     this.running = false;
-    fill.style.width = '100%';
+    if (this.fillEl) {
+      this.fillEl.style.width = res.failed ? `${Math.round(((res.items.length - res.failed) / Math.max(1, res.items.length)) * 100)}%` : '100%';
+      this.fillEl.toggleClass('is-error', !!res.error || res.failed > 0);
+    }
+    this.items = res.items;
+    this.renderItems();
+
     if (res.error) {
-      label.setText(`已停止：${res.error}`);
+      this.sumEl?.setText(`已停止：${res.error}`);
       new Notice(res.error, 12000);
     } else {
-      label.setText(
-        `完成：归档 ${res.written} 篇，跳过 ${res.skipped}${res.stopped ? '（手动停止）' : ''}` +
+      this.sumEl?.setText(
+        `完成：归档 ${res.written} · 已存在 ${res.skipped} · 失败 ${res.failed}${res.stopped ? '（手动停止）' : ''}` +
           (res.written >= this.maxItems ? '｜已达单批上限，隔 10 分钟再跑下一批' : ''),
       );
     }
+
+    // 失败项可一键重试（只重跑失败的那些，不重新翻列表）
+    if (res.failed > 0) {
+      const retry = this.bodyEl?.createEl('button', {
+        cls: 'wmc-hero-btn is-primary',
+        text: `重试失败的 ${res.failed} 篇`,
+      });
+      retry?.addEventListener('click', () => {
+        retry.remove();
+        const ids = res.items.filter((i) => i.state === 'failed').map((i) => i.reviewId);
+        void this.start(ids);
+      });
+    }
+  }
+
+  private renderItems(): void {
+    const el = this.listEl;
+    if (!el) return;
+    el.empty();
+    if (!this.items.length) {
+      el.createDiv({ cls: 'wmc-bf-empty', text: '还没有任务' });
+      return;
+    }
+    for (const it of this.items) {
+      const row = el.createDiv(`wmc-bf-row is-${it.state}`);
+      const ico = row.createSpan({ cls: 'wmc-bf-ico' + (it.state === 'running' ? ' is-spin' : '') });
+      setIcon(ico, ICON[it.state] ?? 'circle');
+      row.createSpan({ cls: 'wmc-bf-title', text: it.title || '(无标题)' });
+      if (it.ms) row.createSpan({ cls: 'wmc-bf-ms', text: `${(it.ms / 1000).toFixed(1)}s` });
+      if (it.note) {
+        row.createSpan({
+          cls: `wmc-bf-note${it.state === 'failed' ? ' is-bad' : ''}`,
+          text: it.note,
+        });
+      }
+    }
+    const running = el.querySelector('.wmc-bf-row.is-running') as HTMLElement | null;
+    if (running) running.scrollIntoView({ block: 'nearest' });
   }
 
   onClose(): void {

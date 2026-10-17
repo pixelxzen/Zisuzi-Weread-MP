@@ -1866,6 +1866,120 @@
   }
 }
 
+
+/* ============ v3.1.0 归档进度逐篇列表 ============ */
+
+.wmc-backfill {
+  max-width: 620px;
+}
+
+.wmc-bf-sum {
+  margin: 8px 0 6px;
+  font-size: 11.5px;
+  color: var(--wmc-ink-3);
+  font-variant-numeric: tabular-nums;
+}
+
+.wmc-bf-list {
+  max-height: 320px;
+  overflow-y: auto;
+  border: 1px solid var(--wmc-line);
+  border-radius: var(--wmc-r-sm);
+  background: var(--wmc-inset);
+}
+
+.wmc-bf-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 27px;
+  padding: 0 9px;
+  border-bottom: 1px solid color-mix(in srgb, var(--wmc-line) 55%, transparent);
+  font-size: 12px;
+}
+
+.wmc-bf-row:last-child {
+  border-bottom: 0;
+}
+
+.wmc-bf-ico {
+  flex: 0 0 14px;
+  display: inline-flex;
+  color: var(--wmc-ink-4);
+}
+
+.wmc-bf-ico .svg-icon {
+  width: 13px;
+  height: 13px;
+}
+
+.wmc-bf-row.is-running {
+  background: var(--wmc-brand-soft);
+}
+
+.wmc-bf-row.is-running .wmc-bf-ico {
+  color: var(--wmc-brand);
+}
+
+.wmc-bf-row.is-done .wmc-bf-ico {
+  color: #34c98e;
+}
+
+.wmc-bf-row.is-failed {
+  background: color-mix(in srgb, #f87171 9%, transparent);
+}
+
+.wmc-bf-row.is-failed .wmc-bf-ico {
+  color: #f87171;
+}
+
+.wmc-bf-title {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--wmc-ink-2);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.wmc-bf-ms {
+  flex: 0 0 auto;
+  font-size: 10.5px;
+  color: var(--wmc-ink-4);
+  font-variant-numeric: tabular-nums;
+}
+
+.wmc-bf-note {
+  flex: 0 0 auto;
+  font-size: 10.5px;
+  color: var(--wmc-ink-4);
+}
+
+.wmc-bf-note.is-bad {
+  color: #f87171;
+}
+
+.wmc-bf-empty {
+  padding: 16px;
+  font-size: 11.5px;
+  color: var(--wmc-ink-4);
+  text-align: center;
+}
+
+.wmc-bf-ico.is-spin .svg-icon {
+  animation: wmc-spin 1s linear infinite;
+}
+
+@keyframes wmc-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.wmc-progress-fill.is-error {
+  background: #f87171;
+}
+
 /* ---------------------------------- menu --------------------------------- */
 
 .wmc-menu {

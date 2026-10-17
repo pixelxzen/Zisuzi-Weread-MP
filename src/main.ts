@@ -23,6 +23,7 @@ import {
 import { htmlToMarkdown, replaceImagePlaceholders, replaceMediaPlaceholders, safeFileName } from './core/html2md';
 import { WmcView, VIEW_TYPE_WMC } from './host/view-linear';
 import { BackfillModal } from './host/backfill-modal';
+import type { BfItem, BfProgress, BfResult } from './core/bf';
 import { WereadAgentApi, fetchApiKey } from './core/weread-api';
 import {
   LLM_DEFAULTS,
@@ -1244,15 +1245,15 @@ export default class WereadMpCatcher extends Plugin {
     }
   }
 
-  /** 单号全量历史归档：分批翻页 + 风控节流 + 可中断 */
+  /** 单号全量历史归档：逐篇状态可观测 + 网络抖动重试 + 风控熔断 */
   async runBackfill(
     acc: AccountRef,
-    opts: { maxItems: number; fromDate: string; speed: 'safe' | 'slow' },
-    onProgress: (p: { phase: 'list' | 'fetch'; done: number; total: number; written: number; title?: string }) => void,
+    opts: { maxItems: number; fromDate: string; speed: 'safe' | 'slow'; only?: string[] },
+    onProgress: (p: BfProgress) => void,
     signal: { stop: boolean },
-  ): Promise<{ written: number; skipped: number; stopped: boolean; error?: string }> {
+  ): Promise<BfResult> {
     const cookie = normalizeCookie(this.settings.cookie || '');
-    if (!checkCookie(cookie).ok) return { written: 0, skipped: 0, stopped: true, error: '登录态无效，请重新扫码' };
+    if (!checkCookie(cookie).ok) return { written: 0, skipped: 0, failed: 0, stopped: true, error: '登录态无效，请重新扫码', items: [] };
     const client = new WereadClient(this.http, cookie);
     const T =
       opts.speed === 'slow'
@@ -1276,38 +1277,104 @@ export default class WereadMpCatcher extends Plugin {
         list.push(it);
         added++;
       }
-      onProgress({ phase: 'list', done: p + 1, total: maxPages, written: 0, title: `已翻 ${p + 1} 页 · 累计 ${list.length} 篇` });
+      onProgress({
+        phase: 'list',
+        done: p + 1,
+        total: maxPages,
+        written: 0,
+        detail: `已翻 ${p + 1} 页 · 累计 ${list.length} 篇`,
+        items: [],
+      });
       if (added === 0) break;
       await sleep(T.list);
     }
 
-    // ② 逐篇抓正文
-    const todo = list
-      .filter((a) => !this.state.processed[a.reviewId])
-      .slice(0, opts.maxItems > 0 ? opts.maxItems : list.length);
-    let written = 0;
-    let skipped = 0;
+    // ② 逐篇任务表（已归档的直接标出来）
+    const only = opts.only && opts.only.length ? new Set(opts.only) : null;
+    const scope = only ? list.filter((a) => only.has(a.reviewId)) : list;
+    const tasks: BfItem[] = scope.map((it) => {
+      const done = !!this.state.processed[it.reviewId] && !only;
+      return {
+        reviewId: it.reviewId,
+        title: it.title,
+        state: done ? 'skipped' : 'pending',
+        note: done ? '已归档' : undefined,
+      };
+    });
+    const todo = tasks
+      .filter((t) => t.state === 'pending')
+      .slice(0, opts.maxItems > 0 ? opts.maxItems : tasks.length);
+    const byId = new Map(tasks.map((t) => [t.reviewId, t]));
+    const itemMap = new Map(scope.map((it) => [it.reviewId, it]));
+    const emit = (done: number, written: number) =>
+      onProgress({ phase: 'fetch', done, total: todo.length, written, items: tasks });
+
+    emit(0, 0);
+    if (!todo.length) {
+      return { written: 0, skipped: tasks.length, failed: 0, stopped: false, items: tasks };
+    }
+
     let n = 0;
-    for (const it of todo) {
+    for (const row of todo) {
       if (signal.stop) break;
+      const it = itemMap.get(row.reviewId);
+      if (!it) continue;
       n++;
-      try {
-        const ok = await this.fetchOne(client, acc, it);
-        if (ok) written++;
-        else skipped++;
-      } catch (e) {
-        if (e instanceof RiskError) {
-          await this.saveAll();
-          return { written, skipped, stopped: true, error: `命中风控 ${e.message}：已停止，不要立刻重试` };
+      row.state = 'running';
+      emit(n - 1, tasks.filter((t) => t.state === 'done').length);
+      const t0 = Date.now();
+      let ok = false;
+      for (let attempt = 1; attempt <= 2; attempt++) {
+        try {
+          ok = await this.fetchOne(client, acc, it);
+          break;
+        } catch (e) {
+          if (e instanceof RiskError) {
+            row.state = 'failed';
+            row.note = '命中风控，已停止';
+            row.ms = Date.now() - t0;
+            emit(n, tasks.filter((t) => t.state === 'done').length);
+            await this.saveAll();
+            return {
+              written: tasks.filter((t) => t.state === 'done').length,
+              skipped: 0,
+              failed: 1,
+              stopped: true,
+              error: `命中风控 ${e.message}：已停止，不要立刻重试`,
+              items: tasks,
+            };
+          }
+          row.tries = attempt;
+          if (attempt < 2) {
+            row.note = '网络抖动 · 重试 1/2';
+            emit(n - 1, tasks.filter((t) => t.state === 'done').length);
+            await sleep(2500);
+          } else {
+            row.state = 'failed';
+            row.note = (e instanceof Error ? e.message : String(e)).slice(0, 60);
+          }
         }
-        skipped++;
       }
-      onProgress({ phase: 'fetch', done: n, total: todo.length, written, title: it.title });
+      row.ms = Date.now() - t0;
+      if (ok) {
+        row.state = 'done';
+        row.note = undefined;
+      } else if (row.state !== 'failed') {
+        row.state = 'skipped';
+        row.note = '正文为空';
+      }
+      emit(n, tasks.filter((t) => t.state === 'done').length);
       if (n % T.every === 0) await sleep(T.rest);
       else await sleep(T.content);
     }
     await this.saveAll();
-    return { written, skipped, stopped: signal.stop };
+    return {
+      written: tasks.filter((t) => t.state === 'done').length,
+      skipped: tasks.filter((t) => t.state === 'skipped').length,
+      failed: tasks.filter((t) => t.state === 'failed').length,
+      stopped: signal.stop,
+      items: tasks,
+    };
   }
 
   /** 用当前 cookie 探测书架号数（设置页「测试连接」用） */
