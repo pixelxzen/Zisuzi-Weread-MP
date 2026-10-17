@@ -855,6 +855,7 @@ export default class WereadMpCatcher extends Plugin {
     }
     await this.saveAll();
     this.renderStatus();
+    this.notifyViews(); // 立刻清掉旧账号的头像 / 昵称 / 订阅列表残影
     this.emitWatch();
   }
 
@@ -957,8 +958,18 @@ export default class WereadMpCatcher extends Plugin {
       } catch {
         /* 用户已手动关闭 */
       }
+      // 关键：拿到登录态后立刻拉资料与书架，否则信息卡/订阅列表要等用户手动操作才出现
+      const prof = await this.refreshProfile().catch(() => null);
       const n = await this.syncAccountsFromShelf();
-      new Notice(`登录成功${key ? '，已获取官方 Key' : ''}${n ? `；书架 ${n} 个公众号` : ''}`, 10000);
+      this.notifyViews();
+      this.renderStatus();
+      this.emitWatch();
+      new Notice(
+        `登录成功${prof?.name ? `：${prof.name}` : ''}${key ? '，已获取官方 Key' : ''}${
+          n ? `；书架 ${n} 个公众号` : ''
+        }`,
+        10000,
+      );
       return;
     }
     this.loginPolling = false;

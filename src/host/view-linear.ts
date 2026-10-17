@@ -811,14 +811,31 @@ export class WmcView extends ItemView {
     const syncBtn = top.createEl('button', { cls: 'wmc-icon-btn' });
     setIcon(syncBtn, 'refresh-cw');
     syncBtn.setAttr('title', '同步最新（只拉新文章，不动已存历史）');
+    // LoadingOrb：Claude Code 用的字符轮转，5 帧叠在同一位置只切透明度，字符不抖动
+    const orb = syncBtn.createSpan({ cls: 'wmc-orb' });
+    const FRAMES = ['✽', '✻', '✶', '✢', '·'];
+    for (const f of FRAMES) orb.createEl('i', { text: f });
     syncBtn.addEventListener('click', async () => {
       if (!this.account) {
         new Notice('先在左栏选一个公众号');
         return;
       }
-      syncBtn.addClass('is-spin');
-      const n = await this.plugin.syncNewArticles(this.account, 20);
-      syncBtn.removeClass('is-spin');
+      if (syncBtn.hasClass('is-syncing')) return;
+      syncBtn.addClass('is-syncing');
+      syncBtn.setAttr('title', '同步中…');
+      const nodes = Array.from(orb.querySelectorAll('i'));
+      let k = 0;
+      const tick = () => {
+        nodes.forEach((n, i) => n.classList.toggle('is-on', i === k % nodes.length));
+        k++;
+      };
+      tick();
+      const timer = window.setInterval(tick, 180);
+      const n = await this.plugin.syncNewArticles(this.account, 20).catch(() => 0);
+      window.clearInterval(timer);
+      nodes.forEach((n, i) => n.classList.toggle('is-on', i === 0));
+      syncBtn.removeClass('is-syncing');
+      syncBtn.setAttr('title', '同步最新（只拉新文章，不动已存历史）');
       new Notice(n > 0 ? `「${this.account}」新增 ${n} 篇` : '没有新文章');
       if (n > 0) this.renderList();
     });

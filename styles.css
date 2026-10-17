@@ -2515,6 +2515,44 @@
   animation: wmc-spin 1s linear infinite;
 }
 
+
+/* LoadingOrb：字符轮转（原版帧序列 ✽ ✻ ✶ ✢ ·） */
+.wmc-icon-btn.is-spin .svg-icon {
+  animation: wmc-spin 1s linear infinite;
+}
+
+.wmc-orb {
+  display: none;
+  position: relative;
+  width: 13px;
+  height: 13px;
+}
+
+.wmc-icon-btn.is-syncing .svg-icon {
+  display: none;
+}
+
+.wmc-icon-btn.is-syncing .wmc-orb {
+  display: block;
+}
+
+.wmc-orb i {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  font-style: normal;
+  font-size: 12px;
+  line-height: 1;
+  color: var(--wmc-brand);
+  opacity: 0;
+  transition: opacity 0.14s linear;
+}
+
+.wmc-orb i.is-on {
+  opacity: 1;
+}
+
 /* ---------------------------------- menu --------------------------------- */
 
 .wmc-menu {
