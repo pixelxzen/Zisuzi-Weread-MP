@@ -4,7 +4,6 @@ import {
   Notice,
   Plugin,
   PluginSettingTab,
-  Setting,
   TFile,
   normalizePath,
   requestUrl,
@@ -2207,98 +2206,109 @@ class WMSettingTab extends PluginSettingTab {
       });
     }
 
-    const loginSetting = new Setting(containerEl)
-      .setName('扫码登录')
-      .setDesc('点「重新扫码」，在弹出的内嵌窗口里扫码。登录态会直接落进 Obsidian，不需要复制任何东西。')
-      .addButton((b) =>
-        b
-          .setButtonText(st === 'full' ? '重新扫码' : '扫码登录')
-          .setCta()
-          .onClick(() => this.plugin.startIframeLogin()),
-      );
+    const loginBtns: { text: string; cta?: boolean; onClick: () => unknown }[] = [
+      {
+        text: st === 'full' ? '重新扫码' : '扫码登录',
+        cta: true,
+        onClick: () => this.plugin.startIframeLogin(),
+      },
+    ];
     if (st !== 'none') {
-      loginSetting.addButton((b) =>
-        b.setButtonText('切换账号').onClick(async () => {
+      loginBtns.push({
+        text: '切换账号',
+        onClick: async () => {
           await this.plugin.logout();
           this.display();
           new Notice('已退出。正在打开登录窗口，扫码登录新账号…', 6000);
           this.plugin.startQrLogin();
-        }),
-      );
+        },
+      });
     }
-    loginSetting
-      .addButton((b) =>
-        b.setButtonText('同步书架').onClick(async () => {
+    loginBtns.push(
+      {
+        text: '同步书架',
+        onClick: async () => {
           const n = await this.plugin.syncAccountsFromShelf();
           new Notice(n ? `已同步 ${n} 个公众号` : '同步失败：先完成扫码登录');
           this.display();
-        }),
-      )
-      .addButton((b) =>
-        b.setButtonText('测试列表').onClick(async () => {
+        },
+      },
+      {
+        text: '测试列表',
+        onClick: async () => {
           new Notice(await this.plugin.testConnection(), 8000);
-        }),
-      );
+        },
+      },
+    );
+    this.frButtons(
+      containerEl,
+      '扫码登录',
+      '点「重新扫码」，在弹出的内嵌窗口里扫码。登录态会直接落进 Obsidian，不需要复制任何东西。',
+      loginBtns,
+    );
 
     // 高级：手动 Cookie（渐进展开，不占视觉）
     const adv = containerEl.createEl('details', { cls: 'wmc-adv' });
     adv.createEl('summary', { text: '高级：手动 Cookie / 诊断' });
-    new Setting(adv)
-      .setName('从 Chrome 导入登录态')
-      .setDesc(
-        'Chrome 用 `open -a "Google Chrome" --args --remote-debugging-port=9222` 启动（先完全退出 Chrome），' +
-          '并登录过 weread.qq.com。这样能拿到含 wr_gid 的完整 cookie。',
-      )
-      .addButton((b) =>
-        b.setButtonText('导入').onClick(async () => {
-          const r = await this.plugin.importCookieFromChrome();
-          new Notice(r, r.startsWith('OK') ? 12000 : 16000);
-          this.display();
-        }),
-      );
-    new Setting(adv)
-      .setName('诊断登录态')
-      .setDesc('把 cookie 与 Obsidian session 的探测结果写入插件目录 诊断.txt')
-      .addButton((b) => b.setButtonText('运行诊断').onClick(() => void this.plugin.diagnoseLogin()));
-    new Setting(adv)
-      .setName('Cookie')
-      .setDesc('仅当扫码取不到登录态时使用；四项齐全才不会报 -2012')
-      .addTextArea((t) => {
-        t.setValue(this.plugin.settings.cookie)
-          .setPlaceholder('wr_vid=…; wr_skey=…; wr_rt=…; wr_gid=…')
-          .onChange(async (v) => {
-            this.plugin.settings.cookie = v.trim();
-            await this.plugin.saveAll();
-          });
-        t.inputEl.rows = 3;
-        t.inputEl.addClass('wmc-cookie');
-      })
-      .addButton((b) =>
-        b.setButtonText('换取官方 Key').onClick(async () => {
-          const k = await this.plugin.refreshApiKey();
-          new Notice(k ? '已获取官方 API Key' : '换取失败：登录态无效');
-          if (k) this.display();
-        }),
-      );
+    this.frButtons(
+      adv,
+      '从 Chrome 导入登录态',
+      'Chrome 需以 --remote-debugging-port=9222 启动（先完全退出 Chrome）且登录过 weread.qq.com，这样能拿到含 wr_gid 的完整 cookie。',
+      [
+        {
+          text: '导入',
+          onClick: async () => {
+            const r = await this.plugin.importCookieFromChrome();
+            new Notice(r, r.startsWith('OK') ? 12000 : 16000);
+            this.display();
+          },
+        },
+      ],
+    );
+    this.frButtons(adv, '诊断登录态', '把 cookie 与 session 的探测结果写入插件目录「诊断.txt」', [
+      { text: '运行诊断', onClick: () => this.plugin.diagnoseLogin() },
+    ]);
+    this.frArea(
+      adv,
+      'Cookie',
+      '仅当扫码取不到登录态时使用；四项齐全才不会报 -2012',
+      this.plugin.settings.cookie,
+      async (v) => {
+        this.plugin.settings.cookie = v.trim();
+        await this.plugin.saveAll();
+      },
+      {
+        placeholder: 'wr_vid=…; wr_skey=…; wr_rt=…; wr_gid=…',
+        rows: 3,
+        button: {
+          text: '换取官方 Key',
+          onClick: async () => {
+            const k = await this.plugin.refreshApiKey();
+            new Notice(k ? '已获取官方 API Key' : '换取失败：登录态无效');
+            if (k) this.display();
+          },
+        },
+      },
+    );
 
     /* 2. 公众号：搜索 + 勾选 */
     containerEl.createDiv({ cls: 'wmc-settings-h', text: '本地 Agent' });
     const agentPreset =
       AGENT_PRESETS.find((p) => p.id === this.plugin.settings.agent.preset) || AGENT_PRESETS[0];
-    new Setting(containerEl)
-      .setName('Agent 类型')
-      .setDesc('插件会调用这个本地 CLI 干活（读笔记、写笔记、跑命令）。默认 Hermes，也可换成你已装的其他 Agent。')
-      .addDropdown((dd) => {
-        for (const p of AGENT_PRESETS) dd.addOption(p.id, p.label);
-        dd.setValue(agentPreset.id);
-        dd.onChange(async (v) => {
-          this.plugin.settings.agent.preset = v;
-          await this.plugin.saveAll();
-          this.display();
-        });
-      })
-      .addButton((b) =>
-        b.setButtonText('测试连接').onClick(async () => {
+    this.frSelect(
+      containerEl,
+      'Agent 类型',
+      '插件会调用这个本地 CLI 干活（读笔记、写笔记、跑命令）。默认 Hermes，也可换成你已装的其他 Agent。',
+      AGENT_PRESETS.map((p) => ({ id: p.id, label: p.label })),
+      agentPreset.id,
+      async (v) => {
+        this.plugin.settings.agent.preset = v;
+        await this.plugin.saveAll();
+        this.display();
+      },
+      {
+        text: '测试连接',
+        onClick: async () => {
           const t = new Notice('正在测试 Agent…', 0);
           try {
             const r = await this.plugin.runAgent('只回四个字：在线可用');
@@ -2313,268 +2323,307 @@ class WMSettingTab extends PluginSettingTab {
             t.hide();
             new Notice(`失败：${e instanceof Error ? e.message : String(e)}`, 9000);
           }
-        }),
-      );
+        },
+      },
+    );
     containerEl.createEl('p', {
       cls: 'setting-item-description',
       text: `实际执行：${agentPreset.hint}`,
     });
 
     if (this.plugin.settings.agent.preset === 'custom') {
-      new Setting(containerEl)
-        .setName('命令')
-        .setDesc('要执行的程序，例如 /usr/local/bin/my-agent')
-        .addText((t) =>
-          t.setValue(this.plugin.settings.agent.cmd).onChange(async (v) => {
-            this.plugin.settings.agent.cmd = v;
-            await this.plugin.saveAll();
-          }),
-        );
-      new Setting(containerEl)
-        .setName('参数')
-        .setDesc('空格分隔，用 {prompt} 代表提问内容，例如 --json {prompt}')
-        .addText((t) =>
-          t.setValue(this.plugin.settings.agent.args.join(' ')).onChange(async (v) => {
-            this.plugin.settings.agent.args = v.split(/\s+/).filter(Boolean);
-            await this.plugin.saveAll();
-          }),
-        );
+      this.frText(
+        containerEl,
+        '命令',
+        '要执行的程序，例如 /usr/local/bin/my-agent',
+        this.plugin.settings.agent.cmd,
+        async (v) => {
+          this.plugin.settings.agent.cmd = v;
+          await this.plugin.saveAll();
+        },
+      );
+      this.frText(
+        containerEl,
+        '参数',
+        '空格分隔，用 {prompt} 代表提问内容，例如 --json {prompt}',
+        this.plugin.settings.agent.args.join(' '),
+        async (v) => {
+          this.plugin.settings.agent.args = v.split(/\s+/).filter(Boolean);
+          await this.plugin.saveAll();
+        },
+      );
     }
 
-    new Setting(containerEl)
-      .setName('文章内嵌入 Agent 侧栏')
-      .setDesc('打开文章时右侧并排显示 Agent（边读边处理）。关掉则只在详情页 Tab 里出现')
-      .addToggle((t) =>
-        t.setValue(this.plugin.settings.agentDocked).onChange(async (v) => {
-          this.plugin.settings.agentDocked = v;
-          await this.plugin.saveAll();
-        }),
-      );
+    this.frToggle(
+      containerEl,
+      '文章内嵌入 Agent 侧栏',
+      '打开文章时右侧并排显示 Agent（边读边处理）。关掉则只在详情页 Tab 里出现',
+      this.plugin.settings.agentDocked,
+      async (v) => {
+        this.plugin.settings.agentDocked = v;
+        await this.plugin.saveAll();
+      },
+    );
 
-    new Setting(containerEl)
-      .setName('工作目录')
-      .setDesc('Agent 执行时的当前目录；留空 = 当前库根目录')
-      .addText((t) =>
-        t.setValue(this.plugin.settings.agent.cwd).onChange(async (v) => {
-          this.plugin.settings.agent.cwd = v.trim();
-          await this.plugin.saveAll();
-        }),
-      );
+    this.frText(
+      containerEl,
+      '工作目录',
+      'Agent 执行时的当前目录；留空 = 当前库根目录',
+      this.plugin.settings.agent.cwd,
+      async (v) => {
+        this.plugin.settings.agent.cwd = v.trim();
+        await this.plugin.saveAll();
+      },
+      { wide: true },
+    );
 
     containerEl.createDiv({ cls: 'wmc-settings-h', text: '盯采公众号' });
     this.renderPicker(containerEl);
 
     const adv2 = containerEl.createEl('details', { cls: 'wmc-adv' });
     adv2.createEl('summary', { text: '手动添加（书架上没有的号）' });
-    new Setting(adv2)
-      .setName('名称 | MP_WXS_xxx')
-      .setDesc('一行一个，也接受阅读页 URL')
-      .addTextArea((t) => {
-        t.setPlaceholder('机器之心 | MP_WXS_3073282833');
-        t.inputEl.rows = 3;
-        t.inputEl.addClass('wmc-accounts-input');
-        t.onChange((v) => (this.accountsDraft = v));
-      })
-      .addButton((b) =>
-        b.setButtonText('添加').onClick(async () => {
-          const added = this.parseAccounts(this.accountsDraft);
-          if (!added) {
-            new Notice('没识别到 bookId（需要 MP_WXS_ 开头）');
-            return;
-          }
-          for (const a of added) {
-            if (!this.plugin.settings.accounts.some((x) => x.bookId === a.bookId)) {
-              this.plugin.settings.accounts.push(a);
+    this.frArea(
+      adv2,
+      '名称 | MP_WXS_xxx',
+      '一行一个，也接受阅读页 URL',
+      this.accountsDraft,
+      (v) => {
+        this.accountsDraft = v;
+      },
+      {
+        placeholder: '机器之心 | MP_WXS_3073282833',
+        rows: 3,
+        button: {
+          text: '添加',
+          onClick: async () => {
+            const added = this.parseAccounts(this.accountsDraft);
+            if (!added.length) {
+              new Notice('没识别到 bookId（需要 MP_WXS_ 开头）');
+              return;
             }
-          }
-          await this.plugin.saveAll();
-          this.accountsDraft = '';
-          this.display();
-        }),
-      );
+            for (const a of added) {
+              if (!this.plugin.settings.accounts.some((x) => x.bookId === a.bookId)) {
+                this.plugin.settings.accounts.push(a);
+              }
+            }
+            await this.plugin.saveAll();
+            this.accountsDraft = '';
+            this.display();
+          },
+        },
+      },
+    );
 
     /* 3. 输出与节奏 */
     containerEl.createDiv({ cls: 'wmc-settings-h', text: '输出' });
-    new Setting(containerEl)
-      .setName('笔记目录')
-      .setDesc('库内相对路径，图片落在 <目录>/assets/<标题>/')
-      .addText((t) =>
-        t.setValue(this.plugin.settings.outputDir).onChange(async (v) => {
-          this.plugin.settings.outputDir = v.trim() || DEFAULTS.outputDir;
-          await this.plugin.saveAll();
-        }),
-      );
+    this.frText(
+      containerEl,
+      '笔记目录',
+      '库内相对路径，图片落在 <目录>/assets/<标题>/',
+      this.plugin.settings.outputDir,
+      async (v) => {
+        this.plugin.settings.outputDir = v.trim() || DEFAULTS.outputDir;
+        await this.plugin.saveAll();
+      },
+      { wide: true },
+    );
 
     containerEl.createDiv({ cls: 'wmc-settings-h', text: '盯采节奏' });
-    new Setting(containerEl)
-      .setName('轮询间隔（分钟）')
-      .setDesc('下限 15 分钟；公众号发文是小时级，30 分钟即准实时')
-      .addText((t) =>
-        t.setValue(String(this.plugin.settings.intervalMin)).onChange(async (v) => {
-          const n = Number(v);
-          if (Number.isFinite(n) && n > 0) {
-            this.plugin.settings.intervalMin = Math.max(MIN_INTERVAL, Math.round(n));
-            await this.plugin.saveAll();
-          }
-        }),
-      );
+    this.frText(
+      containerEl,
+      '轮询间隔（分钟）',
+      '下限 15 分钟；公众号发文是小时级，30 分钟即准实时',
+      String(this.plugin.settings.intervalMin),
+      async (v) => {
+        const n = Number(v);
+        if (Number.isFinite(n) && n > 0) {
+          this.plugin.settings.intervalMin = Math.max(MIN_INTERVAL, Math.round(n));
+          await this.plugin.saveAll();
+        }
+      },
+      { numeric: true },
+    );
 
-    new Setting(containerEl)
-      .setName('每号检查条数 / 翻页数')
-      .setDesc('每页 20 条；翻页越多越耗请求')
-      .addText((t) =>
-        t.setValue(String(this.plugin.settings.pages)).onChange(async (v) => {
-          const n = Number(v);
-          if (Number.isFinite(n) && n >= 1) {
-            this.plugin.settings.pages = Math.min(5, Math.round(n));
-            await this.plugin.saveAll();
-          }
-        }),
-      );
+    this.frText(
+      containerEl,
+      '每号检查条数 / 翻页数',
+      '每页 20 条；翻页越多越耗请求',
+      String(this.plugin.settings.pages),
+      async (v) => {
+        const n = Number(v);
+        if (Number.isFinite(n) && n >= 1) {
+          this.plugin.settings.pages = Math.min(5, Math.round(n));
+          await this.plugin.saveAll();
+        }
+      },
+      { numeric: true },
+    );
 
-    new Setting(containerEl)
-      .setName('单轮上限 / 每号上限')
-      .setDesc('控制单轮落盘量，避免一次性抓太多')
-      .addText((t) =>
-        t.setValue(String(this.plugin.settings.maxPerRun)).onChange(async (v) => {
+    this.frPair(
+      containerEl,
+      '单轮上限 / 每号上限',
+      '控制单轮落盘量，避免一次性抓太多',
+      {
+        value: String(this.plugin.settings.maxPerRun),
+        onChange: async (v) => {
           const n = Number(v);
           if (Number.isFinite(n) && n >= 1) {
             this.plugin.settings.maxPerRun = Math.min(30, Math.round(n));
             await this.plugin.saveAll();
           }
-        }),
-      )
-      .addText((t) =>
-        t.setValue(String(this.plugin.settings.maxPerAccount)).onChange(async (v) => {
+        },
+      },
+      {
+        value: String(this.plugin.settings.maxPerAccount),
+        onChange: async (v) => {
           const n = Number(v);
           if (Number.isFinite(n) && n >= 1) {
             this.plugin.settings.maxPerAccount = Math.min(10, Math.round(n));
             await this.plugin.saveAll();
           }
-        }),
-      );
+        },
+      },
+    );
 
-    new Setting(containerEl)
-      .setName('图片本地化')
-      .setDesc('下载正文图片到库内 assets，避免外链失效')
-      .addToggle((t) =>
-        t.setValue(this.plugin.settings.downloadImages).onChange(async (v) => {
-          this.plugin.settings.downloadImages = v;
-          await this.plugin.saveAll();
-        }),
-      );
+    this.frToggle(
+      containerEl,
+      '图片本地化',
+      '下载正文图片到库内 assets，避免外链失效',
+      this.plugin.settings.downloadImages,
+      async (v) => {
+        this.plugin.settings.downloadImages = v;
+        await this.plugin.saveAll();
+      },
+    );
 
-    new Setting(containerEl)
-      .setName('启动时自动盯采')
-      .setDesc('Obsidian 打开后自动开始轮询')
-      .addToggle((t) =>
-        t.setValue(this.plugin.settings.autoStart).onChange(async (v) => {
-          this.plugin.settings.autoStart = v;
-          await this.plugin.saveAll();
-        }),
-      );
+    this.frToggle(
+      containerEl,
+      '启动时自动盯采',
+      'Obsidian 打开后自动开始轮询',
+      this.plugin.settings.autoStart,
+      async (v) => {
+        this.plugin.settings.autoStart = v;
+        await this.plugin.saveAll();
+      },
+    );
 
     /* 4. AI 模型 */
     containerEl.createDiv({ cls: 'wmc-settings-h', text: 'AI 模型（可选）' });
     const llm = this.plugin.settings.llm;
 
-    new Setting(containerEl)
-      .setName('服务商')
-      .setDesc(PROVIDERS[llm.provider]?.note ?? '任何 OpenAI 兼容端点')
-      .addDropdown((d) => {
-        for (const [id, p] of Object.entries(PROVIDERS)) d.addOption(id, p.label);
-        d.setValue(llm.provider);
-        d.onChange(async (v) => {
-          llm.provider = v as ProviderId;
-          const preset = PROVIDERS[v as ProviderId];
-          if (preset?.baseUrl) llm.baseUrl = preset.baseUrl;
-          if (preset?.model) llm.model = preset.model;
-          await this.plugin.saveAll();
-          this.display();
-        });
-      });
+    this.frSelect(
+      containerEl,
+      '服务商',
+      PROVIDERS[llm.provider]?.note ?? '任何 OpenAI 兼容端点',
+      Object.entries(PROVIDERS).map(([id, prov]) => ({ id, label: prov.label })),
+      llm.provider,
+      async (v) => {
+        llm.provider = v as ProviderId;
+        const preset = PROVIDERS[v as ProviderId];
+        if (preset?.baseUrl) llm.baseUrl = preset.baseUrl;
+        if (preset?.model) llm.model = preset.model;
+        await this.plugin.saveAll();
+        this.display();
+      },
+    );
 
-    new Setting(containerEl)
-      .setName('Base URL')
-      .setDesc('OpenAI 兼容地址，例如 https://api.deepseek.com/v1')
-      .addText((t) =>
-        t.setValue(llm.baseUrl).onChange(async (v) => {
-          llm.baseUrl = v.trim();
-          await this.plugin.saveAll();
-        }),
-      );
+    this.frText(
+      containerEl,
+      'Base URL',
+      'OpenAI 兼容地址，例如 https://api.deepseek.com/v1',
+      llm.baseUrl,
+      async (v) => {
+        llm.baseUrl = v.trim();
+        await this.plugin.saveAll();
+      },
+      { wide: true, placeholder: 'https://api.deepseek.com/v1' },
+    );
 
-    new Setting(containerEl)
-      .setName('API Key')
-      .setDesc('只存在本库插件数据里；本地 Ollama 可留空')
-      .addText((t) => {
-        t.setValue(llm.apiKey);
-        t.inputEl.type = 'password';
-        t.onChange(async (v) => {
-          llm.apiKey = v.trim();
-          await this.plugin.saveAll();
-        });
-      });
+    this.frText(
+      containerEl,
+      'API Key',
+      '只存在本库插件数据里；本地 Ollama 可留空',
+      llm.apiKey,
+      async (v) => {
+        llm.apiKey = v.trim();
+        await this.plugin.saveAll();
+      },
+      { password: true, wide: true, placeholder: 'sk-…' },
+    );
 
-    new Setting(containerEl)
-      .setName('模型名')
-      .addText((t) =>
-        t.setValue(llm.model).onChange(async (v) => {
-          llm.model = v.trim();
-          await this.plugin.saveAll();
-        }),
-      );
+    this.frText(
+      containerEl,
+      '模型名',
+      undefined,
+      llm.model,
+      async (v) => {
+        llm.model = v.trim();
+        await this.plugin.saveAll();
+      },
+      { wide: true },
+    );
 
-    new Setting(containerEl)
-      .setName('温度 / 最大输出')
-      .addText((t) =>
-        t.setValue(String(llm.temperature)).onChange(async (v) => {
+    this.frPair(
+      containerEl,
+      '温度 / 最大输出',
+      undefined,
+      {
+        value: String(llm.temperature),
+        onChange: async (v) => {
           const n = Number(v);
           if (Number.isFinite(n) && n >= 0 && n <= 2) {
             llm.temperature = n;
             await this.plugin.saveAll();
           }
-        }),
-      )
-      .addText((t) =>
-        t.setValue(String(llm.maxTokens)).onChange(async (v) => {
+        },
+      },
+      {
+        value: String(llm.maxTokens),
+        onChange: async (v) => {
           const n = Number(v);
           if (Number.isFinite(n) && n >= 64) {
             llm.maxTokens = Math.min(8000, Math.round(n));
             await this.plugin.saveAll();
           }
-        }),
-      );
-
-    new Setting(containerEl)
-      .setName('每日调用上限')
-      .setDesc(`今天已用 ${this.plugin.state.llmQuota?.count ?? 0} 次`)
-      .addText((t) =>
-        t.setValue(String(llm.dailyCallLimit)).onChange(async (v) => {
-          const n = Number(v);
-          if (Number.isFinite(n) && n >= 1) {
-            llm.dailyCallLimit = Math.round(n);
-            await this.plugin.saveAll();
-          }
-        }),
-      );
-
-    new Setting(containerEl)
-      .setName('入库自动摘要')
-      .setDesc('默认关。开启后每篇归档完成自动调一次模型（约 ¥0.01/篇）')
-      .addToggle((t) =>
-        t.setValue(llm.autoSummarize).onChange(async (v) => {
-          llm.autoSummarize = v;
-          await this.plugin.saveAll();
-        }),
-      );
-
-    new Setting(containerEl).setName('测试连接').addButton((b) =>
-      b.setButtonText('测一下').onClick(async () => {
-        new Notice('测试中…', 3000);
-        new Notice(await this.plugin.testLLMConnection(), 8000);
-      }),
+        },
+      },
     );
+
+    this.frText(
+      containerEl,
+      '每日调用上限',
+      `今天已用 ${this.plugin.state.llmQuota?.count ?? 0} 次`,
+      String(llm.dailyCallLimit),
+      async (v) => {
+        const n = Number(v);
+        if (Number.isFinite(n) && n >= 1) {
+          llm.dailyCallLimit = Math.round(n);
+          await this.plugin.saveAll();
+        }
+      },
+      { numeric: true },
+    );
+
+    this.frToggle(
+      containerEl,
+      '入库自动摘要',
+      '默认关。开启后每篇归档完成自动调一次模型（约 ¥0.01/篇）',
+      llm.autoSummarize,
+      async (v) => {
+        llm.autoSummarize = v;
+        await this.plugin.saveAll();
+      },
+    );
+
+    this.frButtons(containerEl, '测试连接', undefined, [
+      {
+        text: '测一下',
+        onClick: async () => {
+          new Notice('测试中…', 3000);
+          new Notice(await this.plugin.testLLMConnection(), 8000);
+        },
+      },
+    ]);
 
     /* 5. 状态 */
     containerEl.createDiv({ cls: 'wmc-settings-h', text: '状态' });
@@ -2589,24 +2638,175 @@ class WMSettingTab extends PluginSettingTab {
     });
     statusBox.createEl('p', { text: `已归档：${Object.keys(this.plugin.state.processed).length} 篇` });
 
-    new Setting(containerEl)
-      .setName('立即抓取一轮')
-      .addButton((b) =>
-        b
-          .setButtonText('抓取')
-          .setCta()
-          .onClick(() => void this.plugin.runOnce(true)),
-      )
-      .addButton((b) =>
-        b.setButtonText('清空已归档记录').onClick(async () => {
+    this.frButtons(containerEl, '立即抓取一轮', undefined, [
+      { text: '抓取', cta: true, onClick: () => this.plugin.runOnce(true) },
+      {
+        text: '清空已归档记录',
+        danger: true,
+        onClick: async () => {
           this.plugin.state.processed = {};
           await this.plugin.saveAll();
           new Notice('已清空（不会删除已有笔记，但会重复抓取）');
           this.display();
-        }),
-      );
+        },
+      },
+    ]);
 
     this.renderAbout(containerEl);
+  }
+
+
+  /* ==========================================================================
+     设置行 · 手写 DOM 范式（替代 Obsidian 的 new Setting 表单行）
+     原生 .setting-item 视觉太弱、开关不可自绘、双输入组排布僵硬。
+     这里全部自建：标签左 / 控件右 / 说明在下；颜色走 --wmc-* token。
+     ========================================================================== */
+
+  /** 行骨架：返回右侧控件容器 */
+  private fr(parent: HTMLElement, label: string, hint?: string, stack = false): HTMLElement {
+    const row = parent.createDiv({ cls: stack ? 'wmc-fr is-stack' : 'wmc-fr' });
+    const main = row.createDiv('wmc-fr-main');
+    main.createDiv({ cls: 'wmc-fr-label', text: label });
+    if (hint) main.createDiv({ cls: 'wmc-fr-hint', text: hint });
+    return row.createDiv('wmc-fr-ctrl');
+  }
+
+  /** 按钮组 */
+  private frButtons(
+    parent: HTMLElement,
+    label: string,
+    hint: string | undefined,
+    buttons: { text: string; cta?: boolean; danger?: boolean; onClick: () => unknown }[],
+  ): void {
+    const ctrl = this.fr(parent, label, hint);
+    for (const b of buttons) {
+      const el = ctrl.createEl('button', {
+        cls: `wmc-fr-btn${b.cta ? ' is-cta' : ''}${b.danger ? ' is-danger' : ''}`,
+        text: b.text,
+      });
+      el.addEventListener('click', () => void b.onClick());
+    }
+  }
+
+  /** 单行输入 */
+  private frText(
+    parent: HTMLElement,
+    label: string,
+    hint: string | undefined,
+    value: string,
+    onChange: (v: string) => unknown,
+    opts: { password?: boolean; numeric?: boolean; wide?: boolean; placeholder?: string } = {},
+  ): void {
+    const ctrl = this.fr(parent, label, hint);
+    const inp = ctrl.createEl('input', {
+      cls: `wmc-fr-input${opts.numeric ? ' is-num' : ''}${opts.wide ? ' is-wide' : ''}`,
+    });
+    inp.type = opts.password ? 'password' : 'text';
+    if (opts.numeric) inp.inputMode = 'numeric';
+    if (opts.placeholder) inp.placeholder = opts.placeholder;
+    inp.value = value;
+    // 数字框用 change：避免输入中间值（"1" → "12"）被当成最终值存盘
+    inp.addEventListener(opts.numeric ? 'change' : 'input', () => void onChange(inp.value));
+  }
+
+  /** 双数字输入（单轮/每号、温度/最大输出） */
+  private frPair(
+    parent: HTMLElement,
+    label: string,
+    hint: string | undefined,
+    a: { value: string; onChange: (v: string) => unknown },
+    b: { value: string; onChange: (v: string) => unknown },
+    sep = '/',
+  ): void {
+    const ctrl = this.fr(parent, label, hint);
+    const wrap = ctrl.createDiv('wmc-fr-pair');
+    const mk = (v: string, cb: (x: string) => unknown) => {
+      const inp = wrap.createEl('input', { cls: 'wmc-fr-input is-num' });
+      inp.type = 'text';
+      inp.inputMode = 'numeric';
+      inp.value = v;
+      inp.addEventListener('change', () => void cb(inp.value));
+    };
+    mk(a.value, a.onChange);
+    wrap.createDiv({ cls: 'wmc-fr-sep', text: sep });
+    mk(b.value, b.onChange);
+  }
+
+  /** 开关（自绘，不用 Obsidian checkbox） */
+  private frToggle(
+    parent: HTMLElement,
+    label: string,
+    hint: string | undefined,
+    value: boolean,
+    onChange: (v: boolean) => unknown,
+  ): void {
+    const ctrl = this.fr(parent, label, hint);
+    const sw = ctrl.createDiv({ cls: `wmc-fr-switch${value ? ' is-on' : ''}` });
+    sw.setAttribute('role', 'switch');
+    sw.setAttribute('aria-checked', String(value));
+    sw.setAttribute('aria-label', label);
+    sw.tabIndex = 0;
+    const flip = () => {
+      const next = !sw.hasClass('is-on');
+      sw.toggleClass('is-on', next);
+      sw.setAttribute('aria-checked', String(next));
+      void onChange(next);
+    };
+    sw.addEventListener('click', flip);
+    sw.addEventListener('keydown', (e) => {
+      if (e.key === ' ' || e.key === 'Enter') {
+        e.preventDefault();
+        flip();
+      }
+    });
+  }
+
+  /** 下拉（可带一个附加按钮） */
+  private frSelect(
+    parent: HTMLElement,
+    label: string,
+    hint: string | undefined,
+    options: { id: string; label: string }[],
+    value: string,
+    onChange: (v: string) => unknown,
+    extra?: { text: string; onClick: () => unknown },
+  ): void {
+    const ctrl = this.fr(parent, label, hint);
+    const sel = ctrl.createEl('select', { cls: 'wmc-fr-select' });
+    for (const o of options) sel.createEl('option', { value: o.id, text: o.label });
+    sel.value = value;
+    sel.addEventListener('change', () => void onChange(sel.value));
+    if (extra) {
+      const btn = ctrl.createEl('button', { cls: 'wmc-fr-btn', text: extra.text });
+      btn.addEventListener('click', () => void extra.onClick());
+    }
+  }
+
+  /** 多行文本（整行竖排，可带底部按钮） */
+  private frArea(
+    parent: HTMLElement,
+    label: string,
+    hint: string | undefined,
+    value: string,
+    onChange: (v: string) => unknown,
+    opts: {
+      placeholder?: string;
+      rows?: number;
+      button?: { text: string; onClick: () => unknown };
+    } = {},
+  ): void {
+    const ctrl = this.fr(parent, label, hint, true);
+    const ta = ctrl.createEl('textarea', { cls: 'wmc-fr-area' });
+    ta.value = value;
+    if (opts.placeholder) ta.placeholder = opts.placeholder;
+    if (opts.rows) ta.rows = opts.rows;
+    ta.addEventListener('input', () => void onChange(ta.value));
+    const btnCfg = opts.button;
+    if (btnCfg) {
+      const bar = ctrl.createDiv('wmc-fr-ctrl');
+      const btn = bar.createEl('button', { cls: 'wmc-fr-btn', text: btnCfg.text });
+      btn.addEventListener('click', () => void btnCfg.onClick());
+    }
   }
 
   /**
@@ -2736,12 +2936,13 @@ class WMSettingTab extends PluginSettingTab {
     });
     draw();
 
-    new Setting(wrap)
-      .setName('批量操作')
-      .setDesc('只作用于当前搜索结果')
-      .addButton((b) =>
-        b.setButtonText('全选结果').onClick(async () => {
-          const items = shelf.filter((a) => !filter || a.name.toLowerCase().includes(filter) || a.bookId.includes(filter));
+    this.frButtons(wrap, '批量操作', '只作用于当前搜索结果', [
+      {
+        text: '全选结果',
+        onClick: async () => {
+          const items = shelf.filter(
+            (a) => !filter || a.name.toLowerCase().includes(filter) || a.bookId.includes(filter),
+          );
           for (const a of items) {
             if (!picked.has(a.bookId)) {
               plug.settings.accounts.push(a);
@@ -2751,17 +2952,20 @@ class WMSettingTab extends PluginSettingTab {
           await plug.saveAll();
           syncCount();
           draw();
-        }),
-      )
-      .addButton((b) =>
-        b.setButtonText('清空').onClick(async () => {
+        },
+      },
+      {
+        text: '清空',
+        danger: true,
+        onClick: async () => {
           plug.settings.accounts = [];
           picked.clear();
           await plug.saveAll();
           syncCount();
           draw();
-        }),
-      );
+        },
+      },
+    ]);
   }
 
   private parseAccounts(raw: string): AccountRef[] {

@@ -6,6 +6,8 @@
 
 /* ---------------------------------- tokens -------------------------------- */
 .wmc-root,
+.wmc-settings,
+.wmc-about,
 .wmc-bf-modal {
   --wmc-brand: #474980;
   --wmc-brand-fg: color-mix(in srgb, #474980 78%, var(--text-normal));
@@ -56,6 +58,8 @@
    文字状态（已归档 / 失败 / 警告）会看不清，这里换成同色相但压深的版本。
    品牌紫的软底与描边在浅底上也要加浓，否则 10% 几乎不可见。 */
 .theme-light .wmc-root,
+.theme-light .wmc-settings,
+.theme-light .wmc-about,
 .theme-light .wmc-bf-modal {
   /* 文字四档：浅色模式显式给深色。
      不能依赖 var(--text-normal)：实测 AnuPpuccin 等主题在 light 下把它设成
@@ -3046,6 +3050,237 @@
 }
 
 /* 设置页分区标题（替代 h3 标签，避免 Obsidian 扫描器的 heading 规则） */
+
+/* ==========================================================================
+   设置行 · 手写 DOM 范式（wmc-fr = field row）
+   替代 Obsidian 的 new Setting() 表单行。全部颜色走 --wmc-* token，
+   明暗主题自动适配；不引用任何 .setting-item 原生样式。
+   ========================================================================== */
+
+.wmc-fr {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  padding: 13px 0;
+  border-bottom: 1px solid var(--wmc-line);
+}
+.wmc-fr:last-child {
+  border-bottom: none;
+}
+.wmc-fr.is-stack {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 9px;
+}
+
+.wmc-fr-main {
+  flex: 1;
+  min-width: 0;
+}
+
+.wmc-fr-label {
+  font-size: 13.5px;
+  font-weight: 550;
+  line-height: 1.4;
+  color: var(--wmc-ink-1);
+  letter-spacing: -0.01em;
+}
+
+.wmc-fr-hint {
+  margin-top: 3px;
+  font-size: 11.5px;
+  line-height: 1.55;
+  color: var(--wmc-ink-3);
+}
+
+.wmc-fr-ctrl {
+  display: flex;
+  flex-shrink: 0;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+}
+.wmc-fr.is-stack .wmc-fr-ctrl {
+  flex-direction: column;
+  align-items: stretch;
+  justify-content: flex-start;
+}
+.wmc-fr.is-stack .wmc-fr-ctrl .wmc-fr-btn {
+  align-self: flex-start;
+}
+
+/* 按钮 */
+.wmc-fr-btn {
+  height: 30px;
+  padding: 0 12px;
+  border: 1px solid var(--wmc-line-2);
+  border-radius: 7px;
+  background: var(--wmc-raised);
+  color: var(--wmc-ink-1);
+  font-family: inherit;
+  font-size: 12.5px;
+  font-weight: 500;
+  line-height: 1;
+  cursor: pointer;
+  transition: background 120ms cubic-bezier(0.32, 0.72, 0, 1),
+    border-color 120ms cubic-bezier(0.32, 0.72, 0, 1);
+}
+.wmc-fr-btn:hover {
+  background: var(--wmc-hover);
+  border-color: color-mix(in srgb, var(--wmc-ink-3) 55%, transparent);
+}
+.wmc-fr-btn:active {
+  transform: scale(0.985);
+}
+.wmc-fr-btn:focus-visible {
+  outline: none;
+  border-color: var(--wmc-brand-line);
+  box-shadow: 0 0 0 3px var(--wmc-brand-soft);
+}
+.wmc-fr-btn.is-cta {
+  border-color: transparent;
+  background: var(--wmc-brand);
+  color: #fff;
+}
+.wmc-fr-btn.is-cta:hover {
+  background: color-mix(in srgb, var(--wmc-brand) 86%, #000);
+  border-color: transparent;
+}
+.wmc-fr-btn.is-danger {
+  color: var(--wmc-err);
+}
+
+/* 输入 */
+.wmc-fr-input,
+.wmc-fr-area,
+.wmc-fr-select {
+  height: 30px;
+  padding: 0 10px;
+  border: 1px solid var(--wmc-line-2);
+  border-radius: 7px;
+  background: var(--wmc-inset);
+  color: var(--wmc-ink-1);
+  font-family: inherit;
+  font-size: 12.5px;
+  line-height: 1.2;
+  outline: none;
+  transition: border-color 120ms cubic-bezier(0.32, 0.72, 0, 1),
+    box-shadow 120ms cubic-bezier(0.32, 0.72, 0, 1);
+}
+.wmc-fr-input::placeholder,
+.wmc-fr-area::placeholder {
+  color: var(--wmc-ink-4);
+}
+.wmc-fr-input:focus,
+.wmc-fr-area:focus,
+.wmc-fr-select:focus {
+  border-color: var(--wmc-brand-line);
+  box-shadow: 0 0 0 3px var(--wmc-brand-soft);
+}
+.wmc-fr-input {
+  width: 190px;
+}
+.wmc-fr-input.is-num {
+  width: 64px;
+  padding: 0 6px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+.wmc-fr-input.is-wide {
+  width: 268px;
+}
+.wmc-fr-area {
+  width: 100%;
+  height: auto;
+  min-height: 62px;
+  padding: 8px 10px;
+  line-height: 1.6;
+  resize: vertical;
+}
+.wmc-fr-select {
+  padding-right: 26px;
+  appearance: none;
+  cursor: pointer;
+  background-image: linear-gradient(45deg, transparent 50%, currentColor 50%),
+    linear-gradient(135deg, currentColor 50%, transparent 50%);
+  background-position: calc(100% - 14px) 13px, calc(100% - 9px) 13px;
+  background-size: 5px 5px, 5px 5px;
+  background-repeat: no-repeat;
+}
+
+/* 开关（自绘，不用 Obsidian checkbox） */
+.wmc-fr-switch {
+  position: relative;
+  flex-shrink: 0;
+  width: 40px;
+  height: 23px;
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--wmc-ink-4) 55%, transparent);
+  cursor: pointer;
+  transition: background 160ms cubic-bezier(0.32, 0.72, 0, 1);
+}
+.wmc-fr-switch.is-on {
+  background: var(--wmc-brand);
+}
+.wmc-fr-switch:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px var(--wmc-brand-soft);
+}
+.wmc-fr-switch::after {
+  content: '';
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 19px;
+  height: 19px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.28);
+  transition: transform 160ms cubic-bezier(0.32, 0.72, 0, 1);
+}
+.wmc-fr-switch.is-on::after {
+  transform: translateX(17px);
+}
+
+/* 双输入组（单轮/每号、温度/最大输出） */
+.wmc-fr-pair {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.wmc-fr-sep {
+  font-size: 11px;
+  color: var(--wmc-ink-4);
+}
+
+/* 窄视口：整行改竖排 */
+@media (max-width: 720px) {
+  .wmc-fr {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 9px;
+  }
+  .wmc-fr-ctrl {
+    justify-content: flex-start;
+  }
+  .wmc-fr-input,
+  .wmc-fr-input.is-wide {
+    width: 100%;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .wmc-fr-btn,
+  .wmc-fr-switch,
+  .wmc-fr-switch::after,
+  .wmc-fr-input,
+  .wmc-fr-area,
+  .wmc-fr-select {
+    transition: none;
+  }
+}
+
 .wmc-settings-h {
   margin: 22px 0 8px;
   padding-bottom: 6px;
