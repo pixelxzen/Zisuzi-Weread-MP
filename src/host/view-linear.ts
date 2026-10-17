@@ -22,7 +22,7 @@ export interface RowItem {
 }
 
 type Mode = 'list' | 'detail' | 'stats' | 'agent';
-type Tab = 'body' | 'ai' | 'origin';
+type Tab = 'body' | 'ai' | 'agent' | 'origin';
 type Layout = 'card' | 'feed' | 'official' | 'compact';
 type ReadFilter = 'all' | 'unread';
 type ArchFilter = 'all' | 'archived' | 'pending';
@@ -725,7 +725,28 @@ export class WmcView extends ItemView {
     bar.createSpan({ cls: 'wmc-agent-hint', text: '在设置 → 本地 Agent 里可切换 Hermes / Claude Code / Codex 等' });
 
     const out = wrap.createDiv('wmc-agent-out');
-    out.setText(this.agentOut || '在下面提问。Agent 会直接在你的库里动手：读笔记、写笔记、跑命令。');
+    out.setText(
+      this.agentOut ||
+        '打开面板不会消耗任何额度。\n点下面的建议，或自己写一句，按「发送」才会真正调用 Agent。',
+    );
+
+    // 建议指令：点一下填入并直接发送（省得用户不知道怎么开口）
+    if (!this.agentOut && !this.agentBusy) {
+      const sugg = wrap.createDiv('wmc-agent-sugg');
+      const ideas = [
+        '把本周新文章整理成一篇周报，放进 微信读书公众号 目录',
+        '挑出讲 AI 硬件的文章，汇总主要观点',
+        '检查哪些笔记缺图，给出修复清单',
+        '总结一下我订阅的号这周主要在聊什么',
+      ];
+      for (const s of ideas) {
+        const chip = sugg.createEl('button', { cls: 'wmc-agent-chip', text: s });
+        chip.addEventListener('click', () => {
+          ta.value = s;
+          void this.runAgentPrompt(s, out);
+        });
+      }
+    }
 
     const inputRow = wrap.createDiv('wmc-agent-input');
     const ta = inputRow.createEl('textarea', {
@@ -970,9 +991,15 @@ export class WmcView extends ItemView {
     };
     mkTab('body', '正文');
     mkTab('ai', 'AI 摘要');
+    mkTab('agent', 'AI 处理');
     mkTab('origin', '原文');
 
     const body = root.createDiv('wmc-detail-body');
+
+    if (this.tab === 'agent') {
+      await this.renderArticleAgent(r, body);
+      return;
+    }
 
     if (this.tab === 'origin') {
       const a = body.createEl('a', {
@@ -1030,6 +1057,102 @@ export class WmcView extends ItemView {
         btn.setText('失败，重试');
       }
     });
+  }
+
+  /** 就地处理当前文章：把正文喂给本地 Agent，结果可写回笔记 */
+  private async renderArticleAgent(r: RowItem, body: HTMLElement): Promise<void> {
+    let md = '';
+    if (r.path) {
+      try {
+        md = await this.plugin.readNoteBody(r.path);
+      } catch {
+        /* 未归档也能处理，只是没有正文 */
+      }
+    }
+    const plain = md
+      .replace(/!\[[^\]]*\]\([^)]*\)/g, '')
+      .replace(/<[^>]+>/g, '')
+      .replace(/[#>*`_~]/g, '')
+      .replace(/\n{3,}/g, '\n\n')
+      .trim()
+      .slice(0, 8000);
+
+    const head = body.createDiv('wmc-ai-head');
+    head.setText(
+      plain
+        ? `将把这篇的正文（${plain.length} 字）交给 Agent 处理。选一个动作，或自己写要求。`
+        : '这篇还没归档，Agent 只能拿到标题。先归档可获得全文处理能力。',
+    );
+
+    const chips = body.createDiv('wmc-ai-chips');
+    const ACTIONS: Array<{ label: string; prompt: string }> = [
+      { label: '核心观点总结', prompt: '用 5 条要点总结这篇文章的核心观点，每条不超过 40 字，不要客套话。' },
+      { label: '提炼金句', prompt: '挑出 5 句最有价值的原句（严格保持原文，不要改写），各附一句为什么值得记。' },
+      { label: '深度评论', prompt: '以行业分析师视角，指出这篇文章最值得质疑的 3 点和最有价值的 3 个洞见。' },
+      { label: '延伸研究方向', prompt: '基于这篇文章，给出 3 个值得继续研究的方向，每个说明该查什么、为什么。' },
+      { label: '改写为推文', prompt: '把这篇改写成一条 200 字以内的社交媒体推文，保留最有冲击力的事实。' },
+    ];
+
+    const out = body.createDiv('wmc-ai-out');
+    out.setText('选一个动作开始。Agent 会读这篇文章的正文，输出会实时显示在这里。');
+
+    const inputRow = body.createDiv('wmc-ai-input');
+    const ta = inputRow.createEl('textarea', {
+      cls: 'wmc-agent-textarea',
+      placeholder: '或者自己写：把这篇的核心数据做成一张表…',
+    });
+    const send = inputRow.createEl('button', { cls: 'wmc-hero-btn is-primary', text: '运行' });
+
+    const run = async (task: string) => {
+      if (!task.trim() || this.agentBusy) return;
+      this.agentBusy = true;
+      out.setText('运行中…');
+      const prompt = [
+        '你在帮我处理一篇微信读书公众号文章。',
+        `标题：${r.title}`,
+        `公众号：${r.account}`,
+        plain ? '' : '（正文未归档，只有标题，请基于标题给出你可能的方向并说明信息不足）',
+        plain ? '正文如下：' : '',
+        plain,
+        '',
+        `任务：${task}`,
+        '',
+        '直接给出结果，不要复述任务，不要客套。',
+      ]
+        .filter(Boolean)
+        .join('\n');
+      let acc = '';
+      try {
+        const res = await this.plugin.runAgent(prompt, (chunk) => {
+          acc += chunk;
+          out.setText(acc);
+          out.scrollTop = out.scrollHeight;
+        });
+        if (res.code !== 0) {
+          out.setText(`${acc}\n\n[退出码 ${res.code}] ${(res.err || '').split('\n').slice(-3).join('\n')}`);
+        } else if (!acc.trim()) {
+          out.setText('（Agent 没有返回内容）');
+        }
+      } catch (e) {
+        out.setText(`出错：${e instanceof Error ? e.message : String(e)}`);
+      }
+      this.agentBusy = false;
+      if (acc.trim() && r.path) {
+        const write = body.createEl('button', { cls: 'wmc-text-btn', text: '写入这篇笔记' });
+        write.addEventListener('click', async () => {
+          await this.plugin.appendToNote(r.path!, `\n\n## AI 处理 · ${new Date().toLocaleString('zh-CN')}\n\n${acc.trim()}\n`);
+          new Notice('已写入笔记');
+          write.setText('已写入');
+          (write as HTMLButtonElement).disabled = true;
+        });
+      }
+    };
+
+    for (const a of ACTIONS) {
+      const chip = chips.createEl('button', { cls: 'wmc-agent-chip', text: a.label });
+      chip.addEventListener('click', () => void run(a.prompt));
+    }
+    send.addEventListener('click', () => void run(ta.value || '总结这篇文章的核心观点'));
   }
 
   private async doAi(r: RowItem): Promise<void> {

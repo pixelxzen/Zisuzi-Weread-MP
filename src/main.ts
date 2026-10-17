@@ -610,6 +610,13 @@ export default class WereadMpCatcher extends Plugin {
     new Notice(`补全完成：${broken.length} 篇 · 共下载 ${totalOk} 张图`, 10000);
   }
 
+  /** 往笔记末尾追加内容（AI 处理结果写回） */
+  async appendToNote(path: string, text: string): Promise<void> {
+    const f = this.app.vault.getAbstractFileByPath(path);
+    if (!f || !(f instanceof TFile)) throw new Error('笔记不存在');
+    await this.app.vault.append(f, text);
+  }
+
   /** 跑一遍本地 Agent CLI（流式回调）。默认 Hermes，可切 Claude Code / Codex / Kimi / Gemini / Cursor / 自定义 */
   async runAgent(prompt: string, onChunk?: (t: string) => void): Promise<{ code: number; out: string; err: string; cmd: string }> {
     // eslint-disable-next-line @typescript-eslint/no-var-requires
