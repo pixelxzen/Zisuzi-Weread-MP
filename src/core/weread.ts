@@ -173,6 +173,42 @@ export class WereadClient {
     return r.text;
   }
 
+  /** 尽力把微信播放器 iframe 解析成直链 mp4；拿不到就返回原 url */
+  /** 尽力把微信播放器 iframe 解析成直链 mp4；拿不到就返回原 url */
+  async resolveVideo(url: string): Promise<string> {
+    if (/\.(mp4|m3u8)(\?|$)/i.test(url)) return url;
+    const vid = /[?&]vid=([A-Za-z0-9_-]+)/.exec(url)?.[1];
+    if (!vid) return url;
+    try {
+      const api = `https://mp.weixin.qq.com/mp/videoplayer?action=get_mp_video_play_url&preview=0&vid=${vid}`;
+      const r = await this.http(api, {
+        'User-Agent': WEREAD_UA,
+        Referer: 'https://mp.weixin.qq.com/',
+        Accept: '*/*',
+      });
+      if (r.status !== 200) return url;
+      const m =
+        /"url"\s*:\s*"([^"]+\.mp4[^"]*)"/.exec(r.text) ||
+        /url_info[\s\S]{0,600}?"url"\s*:\s*"([^"]+)"/.exec(r.text);
+      if (!m) return url;
+      const direct = m[1].replace(/\\\//g, '/').replace(/\\u0026/g, '&');
+      return /^https?:/.test(direct) ? direct : url;
+    } catch {
+      return url;
+    }
+  }
+
+  /** 下载音频 / 视频二进制（需 mp.weixin Referer） */
+  async fetchMedia(src: string): Promise<ArrayBuffer> {
+    const r = await this.http(src, {
+      'User-Agent': WEREAD_UA,
+      Referer: 'https://mp.weixin.qq.com/',
+      Accept: '*/*',
+    });
+    if (r.status !== 200) throw new Error(`媒体 HTTP ${r.status}`);
+    return r.bytes;
+  }
+
   /** 下载图片（微信 CDN 需要 mp.weixin 的 Referer） */
   async fetchImage(src: string): Promise<ArrayBuffer> {
     const r = await this.http(src, {

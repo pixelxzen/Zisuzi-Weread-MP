@@ -18,7 +18,7 @@ import {
   type HttpFn,
   RiskError,
 } from './core/weread';
-import { htmlToMarkdown, replaceImagePlaceholders, safeFileName } from './core/html2md';
+import { htmlToMarkdown, replaceImagePlaceholders, replaceMediaPlaceholders, safeFileName } from './core/html2md';
 import { WmcView, VIEW_TYPE_WMC } from './host/view-linear';
 import { BackfillModal } from './host/backfill-modal';
 import { WereadAgentApi, fetchApiKey } from './core/weread-api';
@@ -168,6 +168,11 @@ export default class WereadMpCatcher extends Plugin {
     this.renderStatus();
 
     this.registerView(VIEW_TYPE_WMC, (leaf) => new WmcView(leaf, this));
+    // 清理历史遗留的重复面板（同类型 leaf > 1，只保留第一个）
+    this.app.workspace.onLayoutReady(() => {
+      const dup = this.app.workspace.getLeavesOfType(VIEW_TYPE_WMC);
+      if (dup.length > 1) dup.slice(1).forEach((leaf) => leaf.detach());
+    });
     this.addRibbonIcon('rss', '微信读书公众号：打开列表', () => void this.activateView());
     this.addCommand({
       id: 'open-list',
@@ -197,8 +202,11 @@ export default class WereadMpCatcher extends Plugin {
         this.settings.theme = this.settings.theme === 'brand' ? 'linear' : 'brand';
         await this.saveAll();
         new Notice(`界面主题：${this.settings.theme === 'brand' ? '紫苏子品牌' : 'Linear 中性'}`);
-        for (const leaf of this.app.workspace.getLeavesOfType(VIEW_TYPE_WMC)) leaf.detach();
-        await this.activateView();
+        for (const leaf of this.app.workspace.getLeavesOfType(VIEW_TYPE_WMC)) {
+          const v = leaf.view as unknown as { applyTheme?: () => void; render?: () => void };
+          v?.applyTheme?.();
+          v?.render?.();
+        }
       },
     });
     this.addCommand({
@@ -545,8 +553,9 @@ export default class WereadMpCatcher extends Plugin {
 
   private async fetchOne(client: WereadClient, acc: AccountRef, item: ArticleItem): Promise<boolean> {
     const html = await client.getContentHtml(item.reviewId);
-    const { markdown, images } = htmlToMarkdown(html);
-    if (!markdown.trim()) return false; // 纯视频/图片型推送无正文容器，预期跳过
+    const { markdown, images, media } = htmlToMarkdown(html);
+    // 纯图片笔记（小绿书）/ 纯视频推送没有正文文本但有占位符 → 也要归档
+    if (!markdown.trim() && !images.length && !media.length) return false;
 
     const base = safeFileName(item.title || '(无标题)');
     const dir = normalizePath(`${this.settings.outputDir}/${safeFileName(acc.name)}`);
@@ -572,7 +581,35 @@ export default class WereadMpCatcher extends Plugin {
       }
     }
 
-    const bodyMd = replaceImagePlaceholders(markdown, localPaths);
+    // 音视频：尽力解析直链 → 本地化 + Obsidian 播放器标签；失败降级为原站链接
+    const mediaRefs: Array<{ type: 'audio' | 'video'; path?: string; url: string; name?: string }> = [];
+    if (media.length) {
+      await this.ensureFolder(assetDir);
+      for (let i = 0; i < media.length; i++) {
+        const m = media[i];
+        let url = m.url;
+        if (m.type === 'video') url = await client.resolveVideo(url);
+        const direct = /\.(mp4|m3u8|mp3|m4a|aac|wav)(\?|$)/i.test(url);
+        let saved = false;
+        if (this.settings.downloadImages && direct) {
+          try {
+            const buf = await client.fetchMedia(url);
+            const ext = m.type === 'video' ? 'mp4' : url.match(/\.(mp3|m4a|aac|wav)/i)?.[1] || 'mp3';
+            const rel = normalizePath(`${assetDir}/media-${i + 1}.${ext}`);
+            await this.app.vault.adapter.writeBinary(rel, buf);
+            mediaRefs.push({ ...m, url, path: normalizePath(`../assets/${base}/media-${i + 1}.${ext}`) });
+            saved = true;
+          } catch {
+            /* 落到降级分支 */
+          }
+          await sleep(this.settings.delayContentMs);
+        }
+        if (!saved) mediaRefs.push({ ...m, url });
+      }
+    }
+
+    let bodyMd = replaceImagePlaceholders(markdown, localPaths);
+    if (media.length) bodyMd = replaceMediaPlaceholders(bodyMd, mediaRefs);
     const path = normalizePath(`${dir}/${base}.md`);
     if (this.app.vault.getAbstractFileByPath(path)) return false; // 幂等
 
@@ -720,8 +757,16 @@ export default class WereadMpCatcher extends Plugin {
 
   async activateView(): Promise<void> {
     const { workspace } = this.app;
-    // 强制重建：避免恢复的旧视图实例沿用旧渲染逻辑
-    for (const leaf of workspace.getLeavesOfType(VIEW_TYPE_WMC)) leaf.detach();
+    const leaves = workspace.getLeavesOfType(VIEW_TYPE_WMC);
+    // 复用已有视图，绝不 detach（detach 是异步的，会造成双 leaf 垂直 split）
+    if (leaves.length) {
+      const leaf = leaves[0];
+      await leaf.setViewState({ type: VIEW_TYPE_WMC, active: true });
+      const v = leaf.view as unknown as { render?: () => void };
+      v?.render?.();
+      workspace.revealLeaf(leaf);
+      return;
+    }
     const leaf = workspace.getRightLeaf(false) ?? workspace.getLeaf('tab');
     await leaf.setViewState({ type: VIEW_TYPE_WMC, active: true });
     workspace.revealLeaf(leaf);
