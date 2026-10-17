@@ -34,6 +34,7 @@ export class BackfillModal extends Modal {
   private maxItems = 30;
   private fromDate = '';
   private speed: 'safe' | 'slow' = 'safe';
+  private useCache = true;
   private signal = { stop: false };
   private running = false;
 
@@ -147,6 +148,22 @@ export class BackfillModal extends Modal {
     mkSeg('slow', '极保守', '3s / 6s / 10 休 120s');
     addHint(spdVal, '越保守越不容易被风控，也越慢');
 
+    // 数据源：默认走本地缓存（存量列表固定，秒开且不耗网络）
+    const srcVal = row(f2, '数据源');
+    const srcSeg = srcVal.createDiv('wmc-bf-seg');
+    const mkSrc = (v: boolean, label: string, sub: string) => {
+      const b = srcSeg.createEl('button', { cls: `wmc-bf-seg-btn${this.useCache === v ? ' is-on' : ''}` });
+      b.createSpan({ cls: 'wmc-bf-seg-t', text: label });
+      b.createSpan({ cls: 'wmc-bf-seg-s', text: sub });
+      b.addEventListener('click', () => {
+        this.useCache = v;
+        srcSeg.querySelectorAll('.wmc-bf-seg-btn').forEach((el, i) => el.toggleClass('is-on', i === (v ? 0 : 1)));
+      });
+    };
+    mkSrc(true, '本地缓存', '秒开 · 不耗网络');
+    mkSrc(false, '重新翻列表', '慢 · 会走网络');
+    addHint(srcVal, '存量历史一般不会变，用缓存即可');
+
     /* ---------------------------- 组 3：风控说明 ---------------------------- */
     const g3 = contentEl.createDiv('wmc-bf-group');
     const warn = g3.createDiv('wmc-bf-warn');
@@ -211,7 +228,7 @@ export class BackfillModal extends Modal {
 
     const res = await this.plugin.runBackfill(
       acc,
-      { maxItems: this.maxItems, fromDate: this.fromDate, speed: this.speed, only },
+      { maxItems: this.maxItems, fromDate: this.fromDate, speed: this.speed, only, cached: this.useCache },
       (p) => this.renderProgress(p),
       this.signal,
     );

@@ -103,6 +103,8 @@ interface WMState {
   read?: Record<string, number>;
   summaries?: Record<string, string>;
   accountOffsets?: Record<string, number>;
+  /** 该号列表已翻到底（存量固定，不必再翻） */
+  accountDone?: Record<string, boolean>;
   llmQuota?: { day: string; count: number };
   lastRun?: { at: number; found: number; written: number; skipped: number; error?: string };
   watchSince?: number;
@@ -745,6 +747,10 @@ export default class WereadMpCatcher extends Plugin {
         }
       }
       this.state.accountOffsets[acc.name] = offset + items.length;
+      if (items.length < 20) {
+        if (!this.state.accountDone) this.state.accountDone = {};
+        this.state.accountDone[acc.name] = true;
+      }
       if (added || reset) await this.saveAll();
       this.notifyViews();
       if (reset && added) new Notice(`「${name}」首批 ${items.length} 篇已就绪，往下滚继续加载`, 5000);
@@ -761,6 +767,57 @@ export default class WereadMpCatcher extends Plugin {
   }
 
   /** 滚到底时续拉下一页（20 条一页，与网页版一致） */
+  /**
+   * 静默增量同步：只拉最新几页，和本地缓存对比。
+   * 一旦某页全是已知文章，说明作者没有新发（存量列表是固定的），立即停。
+   * 这样选号时无需重新翻全部历史。
+   */
+  async syncNewArticles(name: string, maxPages = 5): Promise<number> {
+    const acc =
+      this.settings.accounts.find((a) => a.name === name) ||
+      this.settings.shelfAccounts.find((a) => a.name === name);
+    if (!acc?.bookId) return 0;
+    const cookie = normalizeCookie(this.settings.cookie || '');
+    if (!checkCookie(cookie).ok) return 0;
+    const client = new WereadClient(this.http, cookie);
+    if (!this.state.discovered) this.state.discovered = {};
+    let added = 0;
+    let offset = 0;
+    for (let page = 0; page < maxPages; page++) {
+      let items: ArticleItem[];
+      try {
+        items = await client.listArticles(acc.bookId, offset);
+      } catch (e) {
+        if (e instanceof RiskError) new Notice('登录过期了，去设置里重新扫码', 9000);
+        break;
+      }
+      if (!items.length) break;
+      let fresh = 0;
+      for (const it of items) {
+        if (!this.state.discovered[it.reviewId]) {
+          this.state.discovered[it.reviewId] = {
+            account: acc.name,
+            title: it.title,
+            time: it.time,
+            readNum: it.readNum,
+            likeNum: it.likeNum,
+            picUrl: it.picUrl,
+          };
+          fresh++;
+        }
+      }
+      added += fresh;
+      if (fresh === 0) break; // 整页都认识 → 没有更新的了
+      offset += items.length;
+      await sleep(this.settings.delayListMs || 1200);
+    }
+    if (added) {
+      await this.saveAll();
+      this.notifyViews();
+    }
+    return added;
+  }
+
   async loadMoreForAccount(name: string): Promise<{ added: number; hasMore: boolean }> {
     const before = Object.keys(this.state.discovered || {}).length;
     const got = await this.fetchAccountList(name, false);
@@ -1262,7 +1319,7 @@ export default class WereadMpCatcher extends Plugin {
   /** 单号全量历史归档：逐篇状态可观测 + 网络抖动重试 + 风控熔断 */
   async runBackfill(
     acc: AccountRef,
-    opts: { maxItems: number; fromDate: string; speed: 'safe' | 'slow'; only?: string[] },
+    opts: { maxItems: number; fromDate: string; speed: 'safe' | 'slow'; only?: string[]; cached?: boolean },
     onProgress: (p: BfProgress) => void,
     signal: { stop: boolean },
   ): Promise<BfResult> {
@@ -1275,11 +1332,37 @@ export default class WereadMpCatcher extends Plugin {
         : { list: 1200, content: 2500, every: 15, rest: 60000 };
     const fromTs = opts.fromDate ? Math.floor(new Date(`${opts.fromDate}T00:00:00`).getTime() / 1000) : 0;
 
-    // ① 翻列表
+    // ① 拿列表：默认用本地缓存（存量固定），需要时才翻网络
     const seen = new Set<string>();
     const list: ArticleItem[] = [];
+    if (opts.cached) {
+      const disc = this.state.discovered || {};
+      for (const [rid, v] of Object.entries(disc)) {
+        if (v.account !== acc.name) continue;
+        if (seen.has(rid)) continue;
+        seen.add(rid);
+        list.push({
+          reviewId: rid,
+          title: v.title,
+          time: v.time,
+          readNum: v.readNum,
+          likeNum: v.likeNum,
+          picUrl: v.picUrl,
+          mpName: acc.name,
+        });
+      }
+      list.sort((a, b) => (b.time || 0) - (a.time || 0));
+      onProgress({
+        phase: 'list',
+        done: 1,
+        total: 1,
+        written: 0,
+        detail: `用本地缓存 · ${list.length} 篇（不耗网络）`,
+        items: [],
+      });
+    }
     const maxPages = opts.maxItems > 0 ? Math.ceil(opts.maxItems / 20) + 3 : 300;
-    for (let p = 0; p < maxPages; p++) {
+    for (let p = 0; opts.cached ? false : p < maxPages; p++) {
       if (signal.stop) break;
       const items = await client.listArticles(acc.bookId, p * 20);
       if (!items.length) break;

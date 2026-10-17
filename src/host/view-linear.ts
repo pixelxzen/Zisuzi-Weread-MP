@@ -80,6 +80,7 @@ export class WmcView extends ItemView {
   private accountExhausted = false;
   private scrollMemory = 0;
   private sideQuery = '';
+  private synced = new Set<string>();
 
   private get panelOpen(): boolean {
     return !!this.plugin.settings.panelOpen;
@@ -807,6 +808,21 @@ export class WmcView extends ItemView {
     const side = parent.createDiv('wmc-side');
     const top = side.createDiv('wmc-side-head');
     top.createSpan({ cls: 'wmc-side-title', text: '公众号' });
+    const syncBtn = top.createEl('button', { cls: 'wmc-icon-btn' });
+    setIcon(syncBtn, 'refresh-cw');
+    syncBtn.setAttr('title', '同步最新（只拉新文章，不动已存历史）');
+    syncBtn.addEventListener('click', async () => {
+      if (!this.account) {
+        new Notice('先在左栏选一个公众号');
+        return;
+      }
+      syncBtn.addClass('is-spin');
+      const n = await this.plugin.syncNewArticles(this.account, 20);
+      syncBtn.removeClass('is-spin');
+      new Notice(n > 0 ? `「${this.account}」新增 ${n} 篇` : '没有新文章');
+      if (n > 0) this.renderList();
+    });
+
     const add = top.createEl('button', { cls: 'wmc-icon-btn' });
     setIcon(add, 'settings-2');
     add.setAttr('title', '管理要盯的公众号');
@@ -846,11 +862,24 @@ export class WmcView extends ItemView {
       row.addEventListener('click', () => {
         this.account = name;
         this.scrollMemory = 0;
-        this.accountExhausted = false;
-        this.renderList();
-        if (name && !this.allRows().some((r) => r.account === name)) {
-          void this.plugin.fetchAccountList(name);
+        // 已翻到底的号，滚到底不再请求
+        this.accountExhausted = !!this.plugin.state.accountDone?.[name];
+        this.renderList(); // 先用本地缓存秒开，不等网络
+        if (!name) return;
+        const hasCache = this.allRows().some((r) => r.account === name);
+        if (!hasCache) {
+          void this.plugin.fetchAccountList(name); // 首次打开：拉首屏
+          return;
         }
+        // 有缓存 → 后台只拉最新几页做增量，遇到已知就停
+        if (this.synced.has(name)) return;
+        this.synced.add(name);
+        void this.plugin.syncNewArticles(name).then((n) => {
+          if (n > 0) {
+            new Notice(`「${name}」新增 ${n} 篇`, 4000);
+            this.renderList();
+          }
+        });
       });
     };
 

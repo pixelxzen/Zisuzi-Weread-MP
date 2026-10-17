@@ -2509,6 +2509,12 @@
   }
 }
 
+
+/* 同步按钮旋转态 */
+.wmc-icon-btn.is-spin .svg-icon {
+  animation: wmc-spin 1s linear infinite;
+}
+
 /* ---------------------------------- menu --------------------------------- */
 
 .wmc-menu {
