@@ -149,6 +149,28 @@ function guessExt(buf: ArrayBuffer): string {
 
 /* --------------------------------- plugin --------------------------------- */
 
+export interface WatchLogItem {
+  at: number;
+  text: string;
+  kind: 'info' | 'ok' | 'warn' | 'err';
+}
+
+export interface WatchStatus {
+  running: boolean;
+  busy: boolean;
+  phase: 'idle' | 'list' | 'fetch' | 'done' | 'cooldown';
+  account?: string;
+  accountIndex: number;
+  accountTotal: number;
+  found: number;
+  written: number;
+  skipped: number;
+  lastRunAt?: number;
+  nextRunAt?: number;
+  lastError?: string;
+  log: WatchLogItem[];
+}
+
 export default class WereadMpCatcher extends Plugin {
   settings: WMSettings = { ...DEFAULTS };
   state: WMState = { processed: {} };
@@ -156,6 +178,56 @@ export default class WereadMpCatcher extends Plugin {
   private running = false;
   private loginPolling = false;
   private statusEl: HTMLElement | null = null;
+
+  private watch: WatchStatus = {
+    running: false,
+    busy: false,
+    phase: 'idle',
+    accountIndex: 0,
+    accountTotal: 0,
+    found: 0,
+    written: 0,
+    skipped: 0,
+    log: [],
+  };
+  private watchListeners = new Set<() => void>();
+
+  onWatch(cb: () => void): () => void {
+    this.watchListeners.add(cb);
+    return () => {
+      this.watchListeners.delete(cb);
+    };
+  }
+
+  private emitWatch(): void {
+    for (const cb of this.watchListeners) {
+      try {
+        cb();
+      } catch {
+        /* noop */
+      }
+    }
+  }
+
+  private pushLog(text: string, kind: WatchLogItem['kind'] = 'info'): void {
+    this.watch.log.push({ at: Date.now(), text, kind });
+    if (this.watch.log.length > 60) this.watch.log.shift();
+  }
+
+  getWatchStatus(): WatchStatus {
+    return this.watch;
+  }
+
+  private notifyViews(): void {
+    for (const leaf of this.app.workspace.getLeavesOfType(VIEW_TYPE_WMC)) {
+      const v = leaf.view as unknown as { render?: () => void };
+      try {
+        v?.render?.();
+      } catch {
+        /* noop */
+      }
+    }
+  }
 
   private http: HttpFn = async (url: string, headers: Record<string, string>) => {
     const param: RequestUrlParam = { url, method: 'GET', headers, throw: false };
@@ -418,6 +490,10 @@ export default class WereadMpCatcher extends Plugin {
     this.state.watchSince = Date.now();
     this.timer = window.setInterval(() => void this.runOnce(false), min * 60 * 1000);
     this.registerInterval(this.timer);
+    this.watch.running = true;
+    this.watch.nextRunAt = Date.now() + min * 60 * 1000;
+    this.pushLog(`盯采已开启 · 每 ${min} 分钟一轮`, 'ok');
+    this.emitWatch();
     this.renderStatus();
     if (notify) new Notice(`自动盯采已开启：每 ${min} 分钟一轮`);
   }
@@ -427,6 +503,10 @@ export default class WereadMpCatcher extends Plugin {
       window.clearInterval(this.timer);
       this.timer = null;
     }
+    this.watch.running = false;
+    this.watch.nextRunAt = undefined;
+    this.pushLog('盯采已停止', 'warn');
+    this.emitWatch();
     this.renderStatus();
     if (notify) new Notice('自动盯采已停止');
   }
@@ -467,6 +547,16 @@ export default class WereadMpCatcher extends Plugin {
     }
 
     this.running = true;
+    this.watch.busy = true;
+    this.watch.phase = 'list';
+    this.watch.accountIndex = 0;
+    this.watch.accountTotal = accounts.length;
+    this.watch.found = 0;
+    this.watch.written = 0;
+    this.watch.skipped = 0;
+    this.watch.lastError = undefined;
+    this.pushLog(`新一轮开始 · ${accounts.length} 个号`);
+    this.emitWatch();
     const client = new WereadClient(this.http, cookie);
     let found = 0;
     let written = 0;
@@ -477,10 +567,14 @@ export default class WereadMpCatcher extends Plugin {
       // ① 收集新条目（按号轮转，保证公平）
       const queueByAccount: Array<{ acc: AccountRef; items: ArticleItem[] }> = [];
       for (const acc of accounts) {
+        this.watch.account = acc.name;
+        this.watch.accountIndex++;
+        this.emitWatch();
         try {
           const items = await client.listArticlesPages(acc.bookId, Math.max(1, this.settings.pages));
           const fresh = items.filter((it) => !this.state.processed[it.reviewId]);
           found += fresh.length;
+          this.watch.found = found;
           // 记入发现清单，供列表页展示（含未归档条目）
           if (!this.state.discovered) this.state.discovered = {};
           for (const it of items) {
@@ -522,17 +616,31 @@ export default class WereadMpCatcher extends Plugin {
 
       for (const job of queue) {
         if (riskHit) break;
+        this.watch.phase = 'fetch';
+        this.watch.account = job.acc.name;
+        this.emitWatch();
         try {
           const ok = await this.fetchOne(client, job.acc, job.item);
-          if (ok) written++;
-          else skipped++;
+          if (ok) {
+            written++;
+            this.watch.written = written;
+          } else {
+            skipped++;
+            this.watch.skipped = skipped;
+          }
+          this.emitWatch();
         } catch (e) {
           if (e instanceof RiskError) {
             riskHit = true;
+            this.watch.lastError = '风控熔断';
+            this.watch.phase = 'cooldown';
+            this.pushLog(`命中风控 ${e.message}，本轮停止`, 'err');
+            this.emitWatch();
             new Notice(`命中风控 ${e.message}：本轮立即停止（不做重试）`, 10000);
             break;
           }
           skipped++;
+          this.watch.skipped = skipped;
         }
         await sleep(this.settings.delayContentMs);
       }
@@ -545,11 +653,22 @@ export default class WereadMpCatcher extends Plugin {
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       this.state.lastRun = { at: Date.now(), found, written, skipped, error: msg };
+      this.watch.lastError = msg.slice(0, 60);
+      this.watch.phase = 'cooldown';
+      this.pushLog(`抓取中断：${msg}`, 'err');
       await this.saveAll();
       new Notice(`抓取中断：${msg}`);
     } finally {
       this.running = false;
+      this.watch.busy = false;
+      if (this.watch.phase !== 'cooldown') this.watch.phase = 'done';
+      this.watch.lastRunAt = Date.now();
+      const min = Math.max(MIN_INTERVAL, Math.round(this.settings.intervalMin || 30));
+      this.watch.nextRunAt = this.timer !== null ? Date.now() + min * 60 * 1000 : undefined;
+      this.pushLog(`本轮完成 · +${written} 落盘 / ${found} 新 / ${skipped} 跳过`, written > 0 ? 'ok' : 'info');
+      this.emitWatch();
       this.renderStatus();
+      this.notifyViews();
     }
   }
 

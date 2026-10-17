@@ -1,5 +1,6 @@
 import { ItemView, MarkdownRenderer, Notice, WorkspaceLeaf, setIcon } from 'obsidian';
 import type WereadMpCatcher from '../main';
+import type { WatchStatus } from '../main';
 import { BackfillModal } from './backfill-modal';
 
 export const VIEW_TYPE_WMC = 'wmc-library';
@@ -67,6 +68,8 @@ export class WmcView extends ItemView {
   private selected: RowItem | null = null;
   private tab: Tab = 'body';
   private filling = false;
+  private unsubWatch: (() => void) | null = null;
+  private logOpen = false;
 
   constructor(leaf: WorkspaceLeaf, plugin: WereadMpCatcher) {
     super(leaf);
@@ -94,8 +97,13 @@ export class WmcView extends ItemView {
     this.applyTheme();
     this.render();
     this.registerDomEvent(this.contentEl, 'keydown', (ev) => this.onKey(ev));
+    // 盯采状态：事件即时刷新 + 1s 兜底（倒计时）
+    this.unsubWatch = this.plugin.onWatch(() => this.refreshWatchbar());
+    this.registerInterval(window.setInterval(() => this.refreshWatchbar(), 1000));
   }
   async onClose(): Promise<void> {
+    this.unsubWatch?.();
+    this.unsubWatch = null;
     this.contentEl.empty();
   }
 
@@ -314,6 +322,74 @@ export class WmcView extends ItemView {
     }
   }
 
+  /* ------------------------- 盯采状态条 + 日志 ------------------------- */
+
+  private watchbar(parent: HTMLElement): void {
+    const s = this.plugin.getWatchStatus();
+    if (!s.running && !s.busy && !s.lastRunAt && !s.log.length) return; // 完全没用过就不显示
+    const bar = parent.createDiv('wmc-watchbar');
+    bar.createDiv('wmc-watch-dot');
+    bar.createDiv('wmc-watch-text');
+    const actions = bar.createDiv('wmc-watch-actions');
+    this.iconBtn(actions, 'zap', '立即抓取一轮', () => void this.plugin.runOnce(true));
+    this.iconBtn(actions, s.running ? 'pause' : 'play', s.running ? '暂停盯采' : '开始盯采', () => {
+      this.plugin.toggleWatchFromView();
+      this.refreshWatchbar();
+    });
+    this.iconBtn(actions, 'scroll-text', this.logOpen ? '收起日志' : '盯采日志', () => {
+      this.logOpen = !this.logOpen;
+      this.render();
+    });
+    if (this.logOpen) this.renderWatchLog(parent, s);
+    this.refreshWatchbar();
+  }
+
+  private renderWatchLog(parent: HTMLElement, s: WatchStatus): void {
+    const panel = parent.createDiv('wmc-watchlog');
+    const items = s.log.slice(-15).reverse();
+    if (!items.length) {
+      panel.createDiv({ cls: 'wmc-hint', text: '还没有日志。' });
+      return;
+    }
+    const p = (n: number) => String(n).padStart(2, '0');
+    for (const it of items) {
+      const row = panel.createDiv(`wmc-watchlog-row is-${it.kind}`);
+      const d = new Date(it.at);
+      row.createSpan({ cls: 'wmc-watchlog-time', text: `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}` });
+      row.createSpan({ cls: 'wmc-watchlog-text', text: it.text });
+    }
+  }
+
+  private refreshWatchbar(): void {
+    const bar = this.contentEl.querySelector('.wmc-watchbar');
+    if (!bar) return;
+    const s = this.plugin.getWatchStatus();
+    const dot = bar.querySelector('.wmc-watch-dot');
+    const text = bar.querySelector('.wmc-watch-text') as HTMLElement | null;
+    if (!dot || !text) return;
+    dot.className = `wmc-watch-dot ${s.busy ? 'is-busy' : s.running ? 'is-idle' : 'is-off'}`;
+    const p = (n: number) => String(n).padStart(2, '0');
+    let t: string;
+    if (s.busy) {
+      t =
+        s.phase === 'list'
+          ? `扫描 ${s.account || '…'}（${s.accountIndex}/${s.accountTotal}）· 新 ${s.found}`
+          : `归档 ${s.account || '…'} · 已落盘 ${s.written}`;
+    } else if (s.running) {
+      const remain = s.nextRunAt ? Math.max(0, s.nextRunAt - Date.now()) : 0;
+      const m = Math.floor(remain / 60000);
+      const sec = Math.floor((remain % 60000) / 1000);
+      t = `盯采中 · 下轮 ${m}:${String(sec).padStart(2, '0')}${s.lastRunAt ? ` · 上次 +${s.written}` : ''}`;
+    } else if (s.lastRunAt) {
+      const d = new Date(s.lastRunAt);
+      t = `已暂停 · 上次 ${p(d.getHours())}:${p(d.getMinutes())} +${s.written}`;
+    } else {
+      t = '盯采未开启';
+    }
+    if (s.lastError) t += ` · ${s.lastError}`;
+    text.setText(t);
+  }
+
   private iconBtn(parent: HTMLElement, icon: string, label: string, onClick: () => void, cta = false): HTMLElement {
     const b = parent.createEl('button', { cls: `wmc-icon-btn${cta ? ' is-cta' : ''}` });
     setIcon(b, icon);
@@ -332,6 +408,7 @@ export class WmcView extends ItemView {
     this.toolbar(root);
     const rows = this.rows();
     this.statbar(root, rows);
+    this.watchbar(root);
 
     if (!rows.length) {
       const e = root.createDiv('wmc-empty');
