@@ -19,7 +19,7 @@ import {
   RiskError,
 } from './core/weread';
 import { htmlToMarkdown, replaceImagePlaceholders, safeFileName } from './core/html2md';
-import { WmcView, VIEW_TYPE_WMC } from './host/view-cards';
+import { WmcView, VIEW_TYPE_WMC } from './host/view-linear';
 import { BackfillModal } from './host/backfill-modal';
 import { WereadAgentApi, fetchApiKey } from './core/weread-api';
 import {
@@ -57,6 +57,8 @@ export interface WMSettings {
   accounts: AccountRef[];
   shelfAccounts: AccountRef[];
   loginProfile?: LoginProfile;
+  layout: 'card' | 'feed' | 'official' | 'compact';
+  theme: 'linear' | 'brand';
   outputDir: string;
   listWidth: number;
   llm: LLMSettings;
@@ -91,6 +93,7 @@ interface WMState {
   processed: Record<string, ProcessedEntry>;
   discovered?: Record<string, DiscoveredEntry>;
   read?: Record<string, number>;
+  summaries?: Record<string, string>;
   llmQuota?: { day: string; count: number };
   lastRun?: { at: number; found: number; written: number; skipped: number; error?: string };
   watchSince?: number;
@@ -101,6 +104,8 @@ const DEFAULTS: WMSettings = {
   wereadApiKey: '',
   accounts: [],
   shelfAccounts: [],
+  layout: 'card',
+  theme: 'linear',
   outputDir: '微信读书公众号',
   listWidth: 300,
   llm: { ...LLM_DEFAULTS },
@@ -184,6 +189,17 @@ export default class WereadMpCatcher extends Plugin {
       id: 'open-login',
       name: '打开微信读书登录窗口',
       callback: () => this.openLoginWindow(),
+    });
+    this.addCommand({
+      id: 'toggle-theme',
+      name: '切换界面主题（Linear ⇄ 紫苏子品牌）',
+      callback: async () => {
+        this.settings.theme = this.settings.theme === 'brand' ? 'linear' : 'brand';
+        await this.saveAll();
+        new Notice(`界面主题：${this.settings.theme === 'brand' ? '紫苏子品牌' : 'Linear 中性'}`);
+        for (const leaf of this.app.workspace.getLeavesOfType(VIEW_TYPE_WMC)) leaf.detach();
+        await this.activateView();
+      },
     });
     this.addCommand({
       id: 'backfill',
@@ -704,11 +720,10 @@ export default class WereadMpCatcher extends Plugin {
 
   async activateView(): Promise<void> {
     const { workspace } = this.app;
-    let leaf = workspace.getLeavesOfType(VIEW_TYPE_WMC)[0];
-    if (!leaf) {
-      leaf = workspace.getRightLeaf(false) ?? workspace.getLeaf('tab');
-      await leaf.setViewState({ type: VIEW_TYPE_WMC, active: true });
-    }
+    // 强制重建：避免恢复的旧视图实例沿用旧渲染逻辑
+    for (const leaf of workspace.getLeavesOfType(VIEW_TYPE_WMC)) leaf.detach();
+    const leaf = workspace.getRightLeaf(false) ?? workspace.getLeaf('tab');
+    await leaf.setViewState({ type: VIEW_TYPE_WMC, active: true });
     workspace.revealLeaf(leaf);
   }
 
