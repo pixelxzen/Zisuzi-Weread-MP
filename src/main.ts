@@ -1007,6 +1007,75 @@ export default class WereadMpCatcher extends Plugin {
     this.emitWatch();
   }
 
+  /**
+   * iframe 内嵌登录：
+   * Obsidian 把 window.open 转给了系统浏览器（setWindowOpenHandler），
+   * 所以扫码窗口必须用同源 iframe —— cookie 落在 Obsidian 的 defaultSession，
+   * 之后 requestUrl 自动携带，不需要读取 cookie（绕过 electron.remote 被移除的问题）。
+   */
+  startIframeLogin(): void {
+    const modal = new Modal(this.app);
+    modal.titleEl.setText('扫码登录微信读书');
+    const box = modal.contentEl.createDiv('wmc-login-iframe-box');
+    box.createDiv({
+      cls: 'wmc-login-tip',
+      text: '在下面窗口里用微信扫码。检测到登录态后会自动关闭并同步书架，不需要复制任何东西。',
+    });
+    const frame = box.createEl('iframe', { cls: 'wmc-login-frame' });
+    frame.setAttr('src', 'https://weread.qq.com/');
+    frame.setAttr('allow', 'clipboard-read; clipboard-write');
+    this.loginPolling = true;
+    modal.open();
+
+    void (async () => {
+      const t0 = Date.now();
+      while (this.loginPolling && Date.now() - t0 < 6 * 60 * 1000) {
+        await sleep(2500);
+        // ① 老环境能直接读 cookie
+        const ck = await this.tryReadSessionCookie();
+        let ok = false;
+        if (ck && checkCookie(ck).ok) {
+          this.settings.cookie = normalizeCookie(ck);
+          this.settings.useSession = false;
+          ok = true;
+        }
+        // ② 读不到就走 session 探测（iframe 登录走这条）
+        if (!ok && (await this.probeSessionLogin())) {
+          this.settings.useSession = true;
+          ok = true;
+        }
+        if (!ok) continue;
+        this.loginPolling = false;
+        try {
+          modal.close();
+        } catch {
+          /* 用户已手动关闭 */
+        }
+        const key = await this.refreshApiKey().catch(() => null);
+        const prof = await this.refreshProfile().catch(() => null);
+        const n = await this.syncAccountsFromShelf().catch(() => 0);
+        const web = await this.checkWebLogin().catch(() => ({ ok: false, msg: '未知' }));
+        this.notifyViews();
+        this.renderStatus();
+        this.emitWatch();
+        new Notice(
+          `登录成功${prof?.name ? `：${prof.name}` : ''}${key ? ' · 已换出官方 Key' : ''}${
+            n ? ` · 书架 ${n} 个` : ''
+          }${web.ok ? ' · 列表可用' : ` · 列表仍不通：${web.msg}`}`,
+          web.ok ? 10000 : 16000,
+        );
+        return;
+      }
+      this.loginPolling = false;
+      try {
+        modal.close();
+      } catch {
+        /* noop */
+      }
+      new Notice('等待扫码超时（6 分钟），已关闭窗口', 8000);
+    })();
+  }
+
   /** 启动自检：没有 cookie 但 Obsidian session 里已登录 → 自动切 session 模式 */
   async autoDetectSession(): Promise<void> {
     if (this.hasLogin()) return;
@@ -2011,12 +2080,12 @@ class WMSettingTab extends PluginSettingTab {
 
     const loginSetting = new Setting(containerEl)
       .setName('扫码登录')
-      .setDesc('点「重新扫码」，在弹出窗口里扫码即可。Obsidian 内置网页标签走独立会话，插件读不到。')
+      .setDesc('点「重新扫码」，在弹出的内嵌窗口里扫码。登录态会直接落进 Obsidian，不需要复制任何东西。')
       .addButton((b) =>
         b
           .setButtonText(st === 'full' ? '重新扫码' : '扫码登录')
           .setCta()
-          .onClick(() => void this.plugin.startQrLogin()),
+          .onClick(() => this.plugin.startIframeLogin()),
       );
     if (st !== 'none') {
       loginSetting.addButton((b) =>

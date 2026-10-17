@@ -2673,6 +2673,29 @@
   color: var(--text-faint);
 }
 
+
+/* iframe 登录窗 */
+.wmc-login-iframe-box {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.wmc-login-tip {
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--text-muted);
+}
+
+.wmc-login-frame {
+  width: 100%;
+  height: 68vh;
+  min-height: 420px;
+  border: 1px solid var(--wmc-line, rgba(255, 255, 255, 0.12));
+  border-radius: 8px;
+  background: #fff;
+}
+
 /* ---------------------------------- menu --------------------------------- */
 
 .wmc-menu {

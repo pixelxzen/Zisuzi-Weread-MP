@@ -1,6 +1,6 @@
 {
   "name": "zisuzi-weread-mp",
-  "version": "3.8.0",
+  "version": "3.9.0",
   "description": "微信读书公众号盯采：登录后自动抓取书架公众号更新，归档为 Obsidian 笔记。",
   "main": "main.js",
   "type": "module",
