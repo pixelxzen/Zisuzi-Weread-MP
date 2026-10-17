@@ -45,6 +45,83 @@
   color: var(--text-normal);
 }
 
+/* 登录状态卡 */
+.wmc-login {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 14px;
+  margin-bottom: 10px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 10px;
+  background: var(--background-secondary);
+}
+
+.wmc-login-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex: 0 0 8px;
+  background: var(--text-faint);
+}
+
+.wmc-login-dot.is-full {
+  background: var(--color-green);
+}
+
+.wmc-login-dot.is-cookie {
+  background: var(--color-orange);
+}
+
+.wmc-login-dot.is-none {
+  background: var(--text-faint);
+}
+
+.wmc-login-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.wmc-login-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-normal);
+}
+
+.wmc-login-sub {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+/* 高级折叠 */
+.wmc-adv {
+  margin-top: 10px;
+  padding: 8px 12px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 8px;
+}
+
+.wmc-adv > summary {
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--text-muted);
+  list-style: none;
+}
+
+.wmc-adv > summary::-webkit-details-marker {
+  display: none;
+}
+
+.wmc-adv > summary::before {
+  content: '▸ ';
+}
+
+.wmc-adv[open] > summary::before {
+  content: '▾ ';
+}
+
 /* ------------------------------ 列表视图 ------------------------------ */
 
 .wmc-root {

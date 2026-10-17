@@ -19,6 +19,7 @@ import {
 } from './core/weread';
 import { htmlToMarkdown, replaceImagePlaceholders, safeFileName } from './core/html2md';
 import { WmcView, VIEW_TYPE_WMC } from './host/weread-view';
+import { WereadAgentApi, fetchApiKey } from './core/weread-api';
 import {
   LLM_DEFAULTS,
   PROVIDERS,
@@ -42,6 +43,7 @@ export interface AccountRef {
 
 export interface WMSettings {
   cookie: string;
+  wereadApiKey: string;
   accounts: AccountRef[];
   outputDir: string;
   listWidth: number;
@@ -84,6 +86,7 @@ interface WMState {
 
 const DEFAULTS: WMSettings = {
   cookie: '',
+  wereadApiKey: '',
   accounts: [],
   outputDir: '微信读书公众号',
   listWidth: 300,
@@ -131,6 +134,7 @@ export default class WereadMpCatcher extends Plugin {
   state: WMState = { processed: {} };
   private timer: number | null = null;
   private running = false;
+  private loginPolling = false;
   private statusEl: HTMLElement | null = null;
 
   private http: HttpFn = async (url: string, headers: Record<string, string>) => {
@@ -190,7 +194,21 @@ export default class WereadMpCatcher extends Plugin {
   }
 
   async saveAll() {
-    await this.saveData({ settings: this.settings, state: this.state });
+    const payload: { settings: WMSettings; state: WMState } = {
+      settings: { ...this.settings },
+      state: this.state,
+    };
+    // 防护：永不把不完整的 cookie 写进磁盘（否则会覆盖掉可用登录态）
+    const now = checkCookie(this.settings.cookie || '');
+    if (!now.ok) {
+      const disk = (await this.loadData()) as { settings?: Partial<WMSettings> } | null;
+      const prev = disk?.settings?.cookie ?? '';
+      if (checkCookie(prev).ok) {
+        payload.settings.cookie = prev;
+        this.settings.cookie = prev;
+      }
+    }
+    await this.saveData(payload);
   }
 
   /* --------------------------------- cookie -------------------------------- */
@@ -226,9 +244,94 @@ export default class WereadMpCatcher extends Plugin {
   async importSessionCookie(): Promise<boolean> {
     const ck = await this.tryReadSessionCookie();
     if (!ck) return false;
+    const chk = checkCookie(ck);
+    if (!chk.ok) {
+      new Notice(`读到的 Cookie 不完整（缺 ${chk.missing.join(', ')}），已拒绝覆盖现有配置`, 8000);
+      return false;
+    }
     this.settings.cookie = ck;
     await this.saveAll();
     return true;
+  }
+
+  /* ------------------------------ 扫码登录 ------------------------------ */
+
+  loginState(): 'none' | 'cookie' | 'full' {
+    const ck = checkCookie(this.settings.cookie || '');
+    const hasKey = /^wrk-/.test(this.settings.wereadApiKey || '');
+    if (ck.ok && hasKey) return 'full';
+    if (ck.ok || hasKey) return 'cookie';
+    return 'none';
+  }
+
+  /** 用当前登录态换官方 API Key */
+  async refreshApiKey(): Promise<string | null> {
+    const ck = normalizeCookie(this.settings.cookie || '');
+    if (!checkCookie(ck).ok) return null;
+    const key = await fetchApiKey(this.llmHttp, ck);
+    if (key) {
+      this.settings.wereadApiKey = key;
+      await this.saveAll();
+    }
+    return key;
+  }
+
+  /** 从官方书架同步公众号清单 */
+  async syncAccountsFromShelf(): Promise<number> {
+    if (!this.settings.wereadApiKey) {
+      const k = await this.refreshApiKey();
+      if (!k) {
+        new Notice('需要先登录（扫码后再同步书架）');
+        return 0;
+      }
+    }
+    try {
+      const api = new WereadAgentApi(this.llmHttp, this.settings.wereadApiKey);
+      const list = await api.mpAccounts();
+      if (!list.length) return 0;
+      this.settings.accounts = list;
+      await this.saveAll();
+      return list.length;
+    } catch (e) {
+      new Notice(`同步书架失败：${e instanceof Error ? e.message : String(e)}`, 8000);
+      return 0;
+    }
+  }
+
+  /** 扫码登录：开窗口 → 轮询登录态 → 存登录态 + 换官方 Key + 同步书架 */
+  async startQrLogin(): Promise<void> {
+    const w = window.open('https://weread.qq.com/', '_blank');
+    if (!w) {
+      new Notice('无法打开登录窗口；请允许 Obsidian 打开新窗口');
+      return;
+    }
+    new Notice('已打开登录窗口：微信扫码后自动完成，不需要复制任何东西', 10000);
+    this.loginPolling = true;
+    const t0 = Date.now();
+    while (this.loginPolling && Date.now() - t0 < 6 * 60 * 1000) {
+      await sleep(3000);
+      const ck = await this.tryReadSessionCookie();
+      if (!ck) continue;
+      if (!checkCookie(ck).ok) continue;
+      this.settings.cookie = normalizeCookie(ck);
+      const key = await fetchApiKey(this.llmHttp, this.settings.cookie);
+      if (key) this.settings.wereadApiKey = key;
+      await this.saveAll();
+      this.loginPolling = false;
+      try {
+        w.close();
+      } catch {
+        /* 用户已手动关闭 */
+      }
+      const n = await this.syncAccountsFromShelf();
+      new Notice(`登录成功${key ? '，已获取官方 Key' : ''}${n ? `；书架 ${n} 个公众号` : ''}`, 10000);
+      return;
+    }
+    this.loginPolling = false;
+  }
+
+  cancelQrLogin(): void {
+    this.loginPolling = false;
   }
 
   /* -------------------------------- watching ------------------------------- */
@@ -555,7 +658,7 @@ export default class WereadMpCatcher extends Plugin {
   }
 
   /** LLM 的 http 适配（requestUrl 支持 POST） */
-  private llmHttp = async (url: string, headers: Record<string, string>, method: string, body?: string) => {
+  private llmHttp = async (url: string, headers: Record<string, string>, method = 'GET', body?: string) => {
     const r = await requestUrl({ url, method, headers, body, throw: false });
     return { status: r.status, text: r.text };
   };
@@ -619,39 +722,67 @@ class WMSettingTab extends PluginSettingTab {
 
     /* 1. 登录 */
     containerEl.createEl('h3', { text: '登录' });
+    const st = this.plugin.loginState();
+    const card = containerEl.createDiv('wmc-login');
+    card.createDiv({ cls: `wmc-login-dot is-${st}` });
+    const txt = card.createDiv('wmc-login-text');
+    txt.createDiv({
+      cls: 'wmc-login-title',
+      text: st === 'full' ? '已登录' : st === 'cookie' ? '登录不完整' : '未登录',
+    });
+    txt.createDiv({
+      cls: 'wmc-login-sub',
+      text:
+        st === 'full'
+          ? `官方 Key 有效 · 书架 ${this.plugin.settings.accounts.length} 个公众号`
+          : st === 'cookie'
+            ? '建议重新扫码，或点「同步书架」补全'
+            : '扫码即可，不需要复制任何 Cookie',
+    });
+
     new Setting(containerEl)
-      .setName('微信读书 Cookie')
-      .setDesc('需要 wr_vid / wr_skey / wr_rt / wr_gid 四项（缺 wr_gid 会报 -2012）')
+      .setName('扫码登录')
+      .setDesc('打开微信读书窗口扫码；完成后自动保存登录态、换出官方 API Key、同步书架公众号')
+      .addButton((b) =>
+        b
+          .setButtonText(st === 'full' ? '重新扫码' : '扫码登录')
+          .setCta()
+          .onClick(() => void this.plugin.startQrLogin()),
+      )
+      .addButton((b) =>
+        b.setButtonText('同步书架').onClick(async () => {
+          const n = await this.plugin.syncAccountsFromShelf();
+          new Notice(n ? `已同步 ${n} 个公众号` : '同步失败：先完成扫码登录');
+          this.display();
+        }),
+      )
+      .addButton((b) =>
+        b.setButtonText('测试抓取').onClick(async () => {
+          new Notice(await this.plugin.testConnection(), 8000);
+        }),
+      );
+
+    // 高级：手动 Cookie（渐进展开，不占视觉）
+    const adv = containerEl.createEl('details', { cls: 'wmc-adv' });
+    adv.createEl('summary', { text: '高级：手动 Cookie（一般不需要）' });
+    new Setting(adv)
+      .setName('Cookie')
+      .setDesc('仅当扫码取不到登录态时使用；四项齐全才不会报 -2012')
       .addTextArea((t) => {
         t.setValue(this.plugin.settings.cookie)
           .setPlaceholder('wr_vid=…; wr_skey=…; wr_rt=…; wr_gid=…')
           .onChange(async (v) => {
-            this.plugin.settings.cookie = v;
+            this.plugin.settings.cookie = v.trim();
             await this.plugin.saveAll();
           });
         t.inputEl.rows = 3;
         t.inputEl.addClass('wmc-cookie');
-      });
-
-    new Setting(containerEl)
-      .setName('登录方式')
-      .setDesc('打开登录窗口扫码后，尝试自动读取登录态；读不到就手动粘贴 Cookie')
+      })
       .addButton((b) =>
-        b.setButtonText('打开登录窗口').onClick(() => this.plugin.openLoginWindow()),
-      )
-      .addButton((b) =>
-        b
-          .setButtonText('读取登录态')
-          .onClick(async () => {
-            const ok = await this.plugin.importSessionCookie();
-            new Notice(ok ? '已读取登录态并保存' : '读取失败：请手动粘贴 Cookie');
-            if (ok) this.display();
-          }),
-      )
-      .addButton((b) =>
-        b.setButtonText('测试连接').onClick(async () => {
-          const msg = await this.plugin.testConnection();
-          new Notice(msg, 8000);
+        b.setButtonText('换取官方 Key').onClick(async () => {
+          const k = await this.plugin.refreshApiKey();
+          new Notice(k ? '已获取官方 API Key' : '换取失败：登录态无效');
+          if (k) this.display();
         }),
       );
 
@@ -885,15 +1016,15 @@ class WMSettingTab extends PluginSettingTab {
     /* 5. 状态 */
     containerEl.createEl('h3', { text: '状态' });
     const last = this.plugin.state.lastRun;
-    const st = containerEl.createDiv('wmc-status');
-    st.createEl('p', {
+    const statusBox = containerEl.createDiv('wmc-status');
+    statusBox.createEl('p', {
       text: last
         ? `上次运行 ${new Date(last.at).toLocaleString()}｜发现 ${last.found}｜落盘 ${last.written}｜跳过 ${last.skipped}${
             last.error ? `｜${last.error}` : ''
           }`
         : '还没有运行记录',
     });
-    st.createEl('p', { text: `已归档：${Object.keys(this.plugin.state.processed).length} 篇` });
+    statusBox.createEl('p', { text: `已归档：${Object.keys(this.plugin.state.processed).length} 篇` });
 
     new Setting(containerEl)
       .setName('立即抓取一轮')
