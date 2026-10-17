@@ -2224,7 +2224,88 @@
   background: color-mix(in srgb, var(--wmc-brand, #474980) 88%, #fff);
 }
 
-/* ===================== v1.1.0 本地 Agent 面板 ===================== */
+/* ===================== v1.2.0 勾选下载 + 全量列表 ===================== */
+
+/* 勾选框：常显半透明，hover/选中变清晰 */
+.wmc-root .wmc-card,
+.wmc-root .wmc-feed-item,
+.wmc-root .wmc-off-row,
+.wmc-root .wmc-cmp-row {
+  position: relative;
+}
+
+.wmc-pick {
+  position: absolute;
+  top: 7px;
+  left: 7px;
+  z-index: 3;
+  width: 15px;
+  height: 15px;
+  margin: 0;
+  accent-color: var(--wmc-brand, #474980);
+  cursor: pointer;
+  opacity: 0.45;
+  transition: opacity 0.12s ease, transform 0.12s ease;
+}
+
+.wmc-card:hover .wmc-pick,
+.wmc-feed-item:hover .wmc-pick,
+.wmc-off-row:hover .wmc-pick,
+.wmc-cmp-row:hover .wmc-pick,
+.wmc-pick:checked {
+  opacity: 1;
+}
+
+.wmc-pick:checked {
+  transform: scale(1.08);
+}
+
+/* 勾选工具栏 */
+.wmc-pickbar {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin-right: 6px;
+}
+
+.wmc-pickbar-btn {
+  height: 26px;
+  padding: 0 10px;
+  border: 1px solid color-mix(in srgb, var(--wmc-brand, #474980) 30%, transparent);
+  border-radius: 7px;
+  background: color-mix(in srgb, var(--wmc-brand, #474980) 10%, transparent);
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--wmc-brand, #474980);
+  cursor: pointer;
+  box-shadow: none;
+  transition: background 0.12s ease;
+}
+
+.wmc-pickbar-btn:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--wmc-brand, #474980) 18%, transparent);
+}
+
+.wmc-pickbar-btn:disabled {
+  border-color: var(--wmc-line, var(--background-modifier-border));
+  background: transparent;
+  color: var(--wmc-ink-3, var(--text-faint));
+  cursor: default;
+}
+
+.wmc-pickbar-count {
+  font-size: 11px;
+  color: var(--wmc-ink-3, var(--text-faint));
+  white-space: nowrap;
+}
+
+.wmc-pickbar-clear {
+  font-size: 11px;
+  color: var(--wmc-brand, #474980);
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
 
 .wmc-root .wmc-agent {
   display: flex;

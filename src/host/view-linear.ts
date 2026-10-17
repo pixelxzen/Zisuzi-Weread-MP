@@ -75,6 +75,7 @@ export class WmcView extends ItemView {
   private panelQuery = '';
   private agentOut = '';
   private agentBusy = false;
+  private selectedIds = new Set<string>();
 
   private get panelOpen(): boolean {
     return !!this.plugin.settings.panelOpen;
@@ -239,6 +240,26 @@ export class WmcView extends ItemView {
     title.setText(this.mode === 'list' ? '微信读书公众号' : this.mode === 'stats' ? '盯采统计' : '文章');
 
     bar.createDiv('wmc-spacer').style.flex = '1';
+
+    // 勾选 → 只下载所选
+    const pickBar = bar.createDiv('wmc-pickbar');
+    const pickBtn = pickBar.createEl('button', {
+      cls: 'wmc-pickbar-btn',
+      text: this.selectedIds.size ? `下载所选 ${this.selectedIds.size} 篇` : '下载所选',
+    });
+    (pickBtn as HTMLButtonElement).disabled = this.selectedIds.size === 0;
+    pickBtn.addEventListener('click', () => void this.downloadSelected());
+    pickBar.createSpan({
+      cls: 'wmc-pickbar-count',
+      text: this.selectedIds.size ? `已选 ${this.selectedIds.size} 篇` : '勾选文章后可只下载它们',
+    });
+    if (this.selectedIds.size) {
+      const clr = pickBar.createSpan({ cls: 'wmc-pickbar-clear', text: '清空' });
+      clr.addEventListener('click', () => {
+        this.selectedIds.clear();
+        this.renderList();
+      });
+    }
 
     this.iconBtn(bar, 'bot', '本地 Agent', () => {
       this.mode = this.mode === 'agent' ? 'list' : 'agent';
@@ -738,10 +759,49 @@ export class WmcView extends ItemView {
   }
 
   private item(r: RowItem): HTMLElement {
-    if (this.layout === 'feed') return this.feedItem(r);
-    if (this.layout === 'official') return this.officialRow(r);
-    if (this.layout === 'compact') return this.compactRow(r);
-    return this.card(r);
+    const el =
+      this.layout === 'feed'
+        ? this.feedItem(r)
+        : this.layout === 'official'
+          ? this.officialRow(r)
+          : this.layout === 'compact'
+            ? this.compactRow(r)
+            : this.card(r);
+    // 勾选框：只下载你勾的这几篇
+    const cb = el.createEl('input', { type: 'checkbox', cls: 'wmc-pick' });
+    cb.checked = this.selectedIds.has(r.reviewId);
+    cb.setAttr('title', '勾选后可点「下载所选」只下载这几篇');
+    cb.addEventListener('click', (ev) => ev.stopPropagation());
+    cb.addEventListener('change', () => {
+      if (cb.checked) this.selectedIds.add(r.reviewId);
+      else this.selectedIds.delete(r.reviewId);
+      this.updatePickBar();
+    });
+    return el;
+  }
+
+  private updatePickBar(): void {
+    const btn = this.contentEl.querySelector('.wmc-pickbar-btn') as HTMLButtonElement | null;
+    const cnt = this.contentEl.querySelector('.wmc-pickbar-count');
+    const n = this.selectedIds.size;
+    if (btn) {
+      btn.disabled = n === 0;
+      btn.setText(n ? `下载所选 ${n} 篇` : '下载所选');
+    }
+    if (cnt) cnt.setText(n ? `已选 ${n} 篇` : '勾选文章后可只下载它们');
+  }
+
+  private async downloadSelected(): Promise<void> {
+    const ids = [...this.selectedIds];
+    if (!ids.length) return;
+    try {
+      const r = await this.plugin.archiveMany(ids);
+      new Notice(`下载完成：成功 ${r.ok} 篇${r.fail ? `，失败/跳过 ${r.fail}` : ''}`, 9000);
+    } catch (e) {
+      new Notice(`下载失败：${e instanceof Error ? e.message : String(e)}`, 9000);
+    }
+    this.selectedIds.clear();
+    this.renderList();
   }
 
   private bindOpen(el: HTMLElement, r: RowItem): void {

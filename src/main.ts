@@ -662,6 +662,50 @@ export default class WereadMpCatcher extends Plugin {
     });
   }
 
+  /** 批量下载选中的文章（只下选的，不碰其他） */
+  async archiveMany(rids: string[]): Promise<{ ok: number; fail: number }> {
+    const cookie = normalizeCookie(this.settings.cookie || '');
+    if (!checkCookie(cookie).ok) throw new Error('登录态无效，请先扫码登录');
+    const client = new WereadClient(this.http, cookie);
+    let ok = 0;
+    let fail = 0;
+    const t = new Notice(`开始下载 ${rids.length} 篇…`, 0);
+    for (let i = 0; i < rids.length; i++) {
+      const rid = rids[i];
+      const d = this.state.discovered?.[rid];
+      if (!d) {
+        fail++;
+        continue;
+      }
+      try {
+        const done = await this.fetchOne(client, { name: d.account, bookId: '' }, {
+          reviewId: rid,
+          title: d.title,
+          time: d.time,
+          readNum: d.readNum,
+          likeNum: d.likeNum,
+          picUrl: d.picUrl,
+          mpName: d.account,
+        });
+        if (done) ok++;
+        else fail++;
+      } catch (e) {
+        if (e instanceof RiskError) {
+          t.hide();
+          new Notice(`命中风控，已停止下载（成功 ${ok} 篇）`, 9000);
+          break;
+        }
+        fail++;
+      }
+      t.setMessage(`下载中 ${i + 1}/${rids.length} · 成功 ${ok}`);
+      await sleep(this.settings.delayContentMs);
+    }
+    t.hide();
+    await this.saveAll();
+    this.notifyViews();
+    return { ok, fail };
+  }
+
   /* ------------------------------ 扫码登录 ------------------------------ */
 
   /** 选中某个号但视图里没有它的文章时，单号轻量拉列表（不抓正文） */
@@ -674,7 +718,10 @@ export default class WereadMpCatcher extends Plugin {
     if (!checkCookie(cookie).ok) return 0;
     const client = new WereadClient(this.http, cookie);
     try {
-      const items = await client.listArticlesPages(acc.bookId, Math.max(1, this.settings.pages));
+      const t = new Notice(`正在加载「${name}」的全部文章…`, 0);
+      // 200 页 = 最多 4000 篇；listArticlesPages 遇到重复页会自动停，等于翻到底
+      const items = await client.listArticlesPages(acc.bookId, 200);
+      t.hide();
       if (!this.state.discovered) this.state.discovered = {};
       let added = 0;
       for (const it of items) {
@@ -692,7 +739,7 @@ export default class WereadMpCatcher extends Plugin {
       }
       if (added) await this.saveAll();
       this.notifyViews();
-      if (added) new Notice(`「${name}」已加载 ${items.length} 篇`);
+      new Notice(`「${name}」共 ${items.length} 篇，新增 ${added} 篇到列表`, 6000);
       return items.length;
     } catch (e) {
       new Notice(`加载「${name}」失败：${e instanceof Error ? e.message : String(e)}`, 6000);
