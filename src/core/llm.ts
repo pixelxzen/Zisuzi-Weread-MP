@@ -4,6 +4,7 @@
  * 只用注入的 http（Obsidian requestUrl），不打包任何厂商 SDK。
  */
 
+import { parseJson, pickArr, pickNum, pickObj, pickStr } from './typed';
 export type ProviderId = 'deepseek' | 'zhipu' | 'kimi' | 'openai' | 'openrouter' | 'ollama' | 'custom';
 
 export interface ProviderPreset {
@@ -189,20 +190,18 @@ export async function chat(
     throw new LLMError('api', `HTTP ${resp.status}：${resp.text.slice(0, 200)}`);
   }
 
-  let json: any;
-  try {
-    json = JSON.parse(resp.text);
-  } catch {
-    throw new LLMError('api', '返回非 JSON（可能是网关/代理页面）');
-  }
-  const text: string = json?.choices?.[0]?.message?.content ?? '';
+  const json = parseJson(resp.text);
+  if (json === null) throw new LLMError('api', '返回非 JSON（可能是网关/代理页面）');
+  const choice = pickObj(pickArr(json, 'choices')[0], 'message');
+  const text = pickStr(choice, 'content');
   if (!text.trim()) throw new LLMError('api', '模型返回空内容');
 
+  const usage = pickObj(json, 'usage');
   return {
     text: text.trim(),
-    model: json?.model ?? cfg.model,
-    promptTokens: json?.usage?.prompt_tokens,
-    completionTokens: json?.usage?.completion_tokens,
+    model: pickStr(json, 'model') || cfg.model,
+    promptTokens: pickNum(usage, 'prompt_tokens'),
+    completionTokens: pickNum(usage, 'completion_tokens'),
   };
 }
 

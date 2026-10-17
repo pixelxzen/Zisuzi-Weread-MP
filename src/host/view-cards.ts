@@ -1,4 +1,6 @@
-import { ItemView, MarkdownRenderer, Notice, WorkspaceLeaf, setIcon } from 'obsidian';
+import { ItemView, MarkdownRenderer, Notice, WorkspaceLeaf, setIcon,
+  TFile,
+} from 'obsidian';
 import type WereadMpCatcher from '../main';
 import { BackfillModal } from './backfill-modal';
 
@@ -328,8 +330,8 @@ export class WmcView extends ItemView {
 
     if (r.archived && r.path) {
       const f = this.app.vault.getAbstractFileByPath(r.path);
-      if (f) {
-        const md = await this.app.vault.cachedRead(f as any);
+      if (f instanceof TFile) {
+        const md = await this.app.vault.cachedRead(f);
         body.addClass('markdown-rendered');
         await MarkdownRenderer.render(this.app, md, body, r.path, this);
         return;

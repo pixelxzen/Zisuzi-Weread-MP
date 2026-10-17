@@ -1,4 +1,6 @@
-import { ItemView, MarkdownRenderer, Notice, WorkspaceLeaf, setIcon } from 'obsidian';
+import { ItemView, MarkdownRenderer, Notice, WorkspaceLeaf, setIcon,
+  TFile,
+} from 'obsidian';
 import type WereadMpCatcher from '../main';
 import type { WatchStatus } from '../main';
 import { AGENT_PRESETS } from '../main';
@@ -303,8 +305,12 @@ export class WmcView extends ItemView {
       this.render();
     });
     this.iconBtn(bar, 'settings-2', '设置', () => {
-      (this.app as any).setting?.open?.();
-      (this.app as any).setting?.openTabById?.('zisuzi-weread-mp');
+      // app.setting 不在 Obsidian 公开类型里，这里局部收窄
+      const st = this.app as unknown as {
+        setting?: { open?: () => void; openTabById?: (id: string) => void };
+      };
+      st.setting?.open?.();
+      st.setting?.openTabById?.('zisuzi-weread-mp');
     });
   }
 
@@ -1208,8 +1214,8 @@ export class WmcView extends ItemView {
 
     if (r.archived && r.path) {
       const f = this.app.vault.getAbstractFileByPath(r.path);
-      if (f) {
-        const md = await this.app.vault.cachedRead(f as any);
+      if (f instanceof TFile) {
+        const md = await this.app.vault.cachedRead(f);
         body.addClass('markdown-rendered');
         await MarkdownRenderer.render(this.app, md, body, r.path, this);
         return;

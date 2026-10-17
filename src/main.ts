@@ -5,6 +5,8 @@ import {
   Plugin,
   PluginSettingTab,
   TFile,
+  TFolder,
+  type TAbstractFile,
   normalizePath,
   requestUrl,
   type RequestUrlParam,
@@ -26,6 +28,25 @@ import { WmcView, VIEW_TYPE_WMC } from './host/view-linear';
 import { BackfillModal } from './host/backfill-modal';
 import { ASSET_AVATAR, ASSET_MP_QR, ASSET_TIP_QR } from './core/assets';
 import type { BfItem, BfProgress, BfResult } from './core/bf';
+import {
+  childProcessModule,
+  createWebviewElement,
+  electronModule,
+  isArr,
+  isObj,
+  nodeOs,
+  nodeRequire,
+  parseJson,
+  pickArr,
+  pickNum,
+  pickObj,
+  processEnv,
+  vaultBasePath,
+  type CliChild,
+  type CdpTarget,
+  type CookieItem,
+  type WebviewElement,
+} from './core/typed';
 import { WereadAgentApi, fetchApiKey } from './core/weread-api';
 import {
   LLM_DEFAULTS,
@@ -357,21 +378,25 @@ export default class WereadMpCatcher extends Plugin {
    * 前提：Chrome 以 --remote-debugging-port=9222 启动；已经登录过 weread.qq.com。
    */
   async importCookieFromChrome(): Promise<string> {
-    let targets: any[] = [];
+    let targets: CdpTarget[] = [];
     try {
       const r = await requestUrl({ url: 'http://127.0.0.1:9222/json', method: 'GET', throw: false });
       if (r.status !== 200) throw new Error(`HTTP ${r.status}`);
-      targets = JSON.parse(r.text);
+      const parsed = parseJson(r.text);
+      targets = isArr(parsed) ? parsed.filter(isObj).map((o): CdpTarget => o) : [];
     } catch (e) {
       return `CDP_OFF：连不上 127.0.0.1:9222（${String(e).slice(0, 50)}）`;
     }
     const page = targets.find((t) => t.type === 'page' && t.webSocketDebuggerUrl) || targets[0];
     if (!page?.webSocketDebuggerUrl) return 'CDP_OFF：没有可用页面';
 
-    let cookies: any[] = [];
+    const wsUrl = page.webSocketDebuggerUrl;
+    if (!wsUrl) return 'CDP_OFF：页面没有调试端点';
+
+    let cookies: CookieItem[] = [];
     try {
-      cookies = await new Promise<any[]>((resolve, reject) => {
-        const ws = new WebSocket(page.webSocketDebuggerUrl);
+      cookies = await new Promise<CookieItem[]>((resolve, reject) => {
+        const ws = new WebSocket(wsUrl);
         const timer = window.setTimeout(() => {
           try {
             ws.close();
@@ -383,11 +408,13 @@ export default class WereadMpCatcher extends Plugin {
         ws.onopen = () => ws.send(JSON.stringify({ id: 1, method: 'Network.getAllCookies' }));
         ws.onmessage = (ev) => {
           try {
-            const msg = JSON.parse(String(ev.data));
-            if (msg.id === 1 && Array.isArray(msg.result?.cookies)) {
+            const msg = parseJson(String(ev.data));
+            const result = pickObj(msg, 'result');
+            const list = pickArr(result, 'cookies');
+            if (pickNum(msg, 'id') === 1 && list.length) {
               window.clearTimeout(timer);
               ws.close();
-              resolve(msg.result.cookies);
+              resolve(list.filter(isObj) as unknown as CookieItem[]);
             }
           } catch {
             /* 忽略非 JSON 帧 */
@@ -402,7 +429,7 @@ export default class WereadMpCatcher extends Plugin {
       return `CDP_FAIL：${String(e).slice(0, 60)}`;
     }
 
-    const wr = cookies.filter((c) => String(c.name).startsWith('wr_') && /weread/.test(String(c.domain)));
+    const wr = cookies.filter((c) => c.name.startsWith('wr_') && /weread/.test(c.domain ?? ''));
     if (!wr.length) return 'NO_WEREAD_COOKIE：Chrome 里没找到 weread 登录态，先在浏览器登录一次';
     const jar: Record<string, string> = {};
     for (const c of wr) jar[c.name] = c.value;
@@ -597,14 +624,10 @@ export default class WereadMpCatcher extends Plugin {
   /** 尝试从 Obsidian(Electron) session 读取 weread cookie；不可用时返回 null */
   async tryReadSessionCookie(): Promise<string | null> {
     try {
-      // eslint-disable-next-line @typescript-eslint/no-var-requires -- 运行时按需加载 node/electron 模块，静态 import 会在移动端直接崩
-      const electron: any = (window as any).require?.('electron');
-      const remote = electron?.remote;
-      const session = remote?.session?.defaultSession;
-      if (!session?.cookies?.get) return null;
-      const list: Array<{ name: string; value: string; domain: string }> = await session.cookies.get({
-        domain: '.weread.qq.com',
-      });
+      // 运行时按需加载 electron 模块：静态 import 会在移动端直接崩
+      const cookies = electronModule()?.remote?.session?.defaultSession?.cookies;
+      if (!cookies?.get) return null;
+      const list = await cookies.get({ domain: '.weread.qq.com' });
       if (!list?.length) return null;
       return list.map((c) => `${c.name}=${c.value}`).join('; ');
     } catch {
@@ -736,12 +759,14 @@ export default class WereadMpCatcher extends Plugin {
   async repairAllNotes(): Promise<void> {
     const folder = this.app.vault.getAbstractFileByPath(this.settings.outputDir);
     const files: TFile[] = [];
-    const walk = (node: any) => {
+    const walk = (node: TAbstractFile) => {
       if (node instanceof TFile) {
         if (node.extension === 'md') files.push(node);
         return;
       }
-      for (const child of node?.children || []) walk(child);
+      if (node instanceof TFolder) {
+        for (const child of node.children) walk(child);
+      }
     };
     if (folder) walk(folder);
     if (!files.length) {
@@ -785,9 +810,9 @@ export default class WereadMpCatcher extends Plugin {
 
   /** 跑一遍本地 Agent CLI（流式回调）。默认 Hermes，可切 Claude Code / Codex / Kimi / Gemini / Cursor / 自定义 */
   async runAgent(prompt: string, onChunk?: (t: string) => void): Promise<{ code: number; out: string; err: string; cmd: string }> {
-    // eslint-disable-next-line @typescript-eslint/no-var-requires -- 运行时按需加载 node/electron 模块，静态 import 会在移动端直接崩
-    const cp = (window as any).require?.('child_process');
-    if (!cp?.spawn) throw new Error('当前环境不支持执行本地命令（仅桌面端可用）');
+    // 运行时按需加载 child_process：静态 import 会在移动端直接崩
+    const spawn = childProcessModule()?.spawn;
+    if (!spawn) throw new Error('当前环境不支持执行本地命令（仅桌面端可用）');
 
     const cfg = this.settings.agent || { preset: 'hermes', cmd: '', args: [], cwd: '' };
     const preset = AGENT_PRESETS.find((p) => p.id === cfg.preset) || AGENT_PRESETS[0];
@@ -797,36 +822,36 @@ export default class WereadMpCatcher extends Plugin {
     const args = rawArgs.map((a) => a.replace('{prompt}', prompt));
 
     // Obsidian 是 GUI 进程，PATH 往往只有 /usr/bin:/bin —— 必须手工补全
-    const home = (window as any).require?.('os')?.homedir?.() || '';
-    const baseEnv = (window as any).process?.env || {};
+    const home = nodeOs()?.homedir?.() || '';
+    const baseEnv = processEnv();
     const env = {
       ...baseEnv,
       PATH: ['/opt/homebrew/bin', '/usr/local/bin', home ? `${home}/.local/bin` : '', home ? `${home}/.kimi-code/bin` : '', '/usr/bin', '/bin', '/usr/sbin', '/sbin']
         .filter(Boolean)
         .join(':'),
     };
-    const cwd = cfg.cwd || (this.app.vault.adapter as any).getBasePath?.() || undefined;
+    const cwd = cfg.cwd || vaultBasePath(this.app.vault.adapter) || undefined;
 
     return new Promise((resolve) => {
       let out = '';
       let err = '';
-      let child: any;
+      let child: CliChild;
       try {
-        child = cp.spawn(cmd, args, { cwd, env });
+        child = spawn(cmd, args, { cwd, env });
       } catch (e) {
         resolve({ code: -1, out: '', err: String(e), cmd });
         return;
       }
-      child.stdout?.on('data', (d: any) => {
+      child.stdout?.on('data', (d) => {
         const s = d.toString();
         out += s;
         onChunk?.(s);
       });
-      child.stderr?.on('data', (d: any) => {
+      child.stderr?.on('data', (d) => {
         err += d.toString();
       });
-      child.on('error', (e: any) => resolve({ code: -1, out, err: `${err}\n${String(e)}`.trim(), cmd }));
-      child.on('close', (code: number) => resolve({ code: code ?? -1, out, err, cmd }));
+      child.on('error', (e) => resolve({ code: -1, out, err: `${err}\n${String(e)}`.trim(), cmd }));
+      child.on('close', (code) => resolve({ code: code ?? -1, out, err, cmd }));
     });
   }
 
@@ -989,9 +1014,8 @@ export default class WereadMpCatcher extends Plugin {
   /** 登出：清本地登录态 + 清 Electron session 里 weread 域 cookie（不清的话重扫码还是旧账号） */
   async logout(): Promise<void> {
     try {
-      // eslint-disable-next-line @typescript-eslint/no-var-requires -- 运行时按需加载 node/electron 模块，静态 import 会在移动端直接崩
-      const electron: any = (window as any).require?.('electron');
-      const session = electron?.remote?.session?.defaultSession;
+      // 运行时按需加载 electron 模块：静态 import 会在移动端直接崩
+      const session = electronModule()?.remote?.session?.defaultSession;
       if (session?.clearStorageData) {
         await session.clearStorageData({ origin: 'https://weread.qq.com', storages: ['cookies'] });
       }
@@ -1037,9 +1061,9 @@ export default class WereadMpCatcher extends Plugin {
     const status = box.createDiv({ cls: 'wmc-login-status', text: '等待扫码…' });
     // 必须用 webview 而不是 iframe：iframe 跨域读不到 document.cookie，
     // webview 是独立 webContents，executeJavaScript 能在目标页上下文里取 cookie。
-    let wv: any = null;
+    let wv: WebviewElement | null = null;
     try {
-      wv = document.createElement('webview');
+      wv = createWebviewElement();
       wv.className = 'wmc-login-frame';
       wv.setAttribute('src', 'https://weread.qq.com/');
       wv.setAttribute('allowpopups', 'false');
@@ -1247,14 +1271,14 @@ export default class WereadMpCatcher extends Plugin {
     // 2) Electron 能力探测
     out.push('\n[2] Electron 能力：');
     try {
-      // eslint-disable-next-line @typescript-eslint/no-var-requires -- 运行时按需加载 node/electron 模块，静态 import 会在移动端直接崩
-      const req = (window as any).require;
+      // 运行时按需加载 node/electron 模块
+      const req = nodeRequire();
       out.push(`    require 存在: ${!!req}`);
-      const el = req?.('electron');
+      const el = req ? req<Record<string, unknown>>('electron') : null;
       out.push(`    require('electron'): ${el ? Object.keys(el).slice(0, 12).join(',') : 'null'}`);
       out.push(`    electron.remote: ${el?.remote ? 'ok' : 'null'}`);
       try {
-        const r2 = req?.('@electron/remote');
+        const r2 = req ? req<Record<string, unknown>>('@electron/remote') : null;
         out.push(`    @electron/remote: ${r2 ? 'ok' : 'null'}`);
       } catch (e) {
         out.push(`    @electron/remote: 抛错 ${String(e).slice(0, 60)}`);
@@ -2054,8 +2078,8 @@ export default class WereadMpCatcher extends Plugin {
 
   async readNoteBody(path: string): Promise<string> {
     const f = this.app.vault.getAbstractFileByPath(path);
-    if (!f) return '';
-    const md = await this.app.vault.cachedRead(f as any);
+    if (!(f instanceof TFile)) return '';
+    const md = await this.app.vault.cachedRead(f);
     const i = md.indexOf('## 正文');
     return i >= 0 ? md.slice(i + 5) : md;
   }
@@ -2127,13 +2151,13 @@ export default class WereadMpCatcher extends Plugin {
     const stamp = new Date().toLocaleString();
     const block = `\n\n## AI 摘要\n\n> ${cfg.model} · ${stamp}\n\n${text}\n`;
     const f = this.app.vault.getAbstractFileByPath(path);
-    if (!f) return false;
-    const md = await this.app.vault.cachedRead(f as any);
+    if (!(f instanceof TFile)) return false;
+    const md = await this.app.vault.cachedRead(f);
     const marker = '## AI 摘要';
     const next = md.includes(marker)
       ? md.slice(0, md.indexOf(marker)).replace(/\s+$/, '') + block
       : md.replace(/\s+$/, '') + block;
-    await this.app.vault.process(f as any, () => next);
+    await this.app.vault.process(f, () => next);
     await this.saveAll();
     return true;
   }

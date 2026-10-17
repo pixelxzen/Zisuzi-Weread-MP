@@ -5,6 +5,7 @@
  * 取 Key：GET https://weread.qq.com/api/skills/apikeyGet （需登录 cookie）
  */
 
+import { isObj, parseJson, pickStr } from './typed';
 export interface HttpRespLike {
   status: number;
   text: string;
@@ -52,23 +53,26 @@ export class WereadAgentApi {
     );
     if (resp.status === 401 || resp.status === 403) throw new AgentApiError(-401, 'API Key 无效或已失效');
     if (resp.status !== 200) throw new AgentApiError(resp.status, `网关 HTTP ${resp.status}`);
-    let json: any;
-    try {
-      json = JSON.parse(resp.text);
-    } catch {
-      throw new AgentApiError(-2, '网关返回非 JSON');
-    }
-    const code = json?.errcode ?? json?.errCode ?? 0;
-    if (typeof code === 'number' && code !== 0) {
-      throw new AgentApiError(code, `接口错误 ${code}${json?.errmsg ? '：' + json.errmsg : ''}`);
+    const json = parseJson(resp.text);
+    if (json === null) throw new AgentApiError(-2, '网关返回非 JSON');
+    // 服务端 errcode / errCode 两种写法都出现过
+    const rawCode = isObj(json) ? (json.errcode ?? json.errCode) : undefined;
+    const code = typeof rawCode === 'number' ? rawCode : 0;
+    if (code !== 0) {
+      const msg = pickStr(json, 'errmsg', 'errMsg');
+      throw new AgentApiError(code, `接口错误 ${code}${msg ? '：' + msg : ''}`);
     }
     return json as T;
   }
 
   /** 完整书架（含书 / 有声书 / 文章收藏） */
   async shelfSync(): Promise<{ books: ShelfBook[]; albums: any[]; mp?: any }> {
-    const r = await this.gateway<any>('/shelf/sync');
-    return { books: r.books ?? [], albums: r.albums ?? [], mp: r.mp };
+    const r = await this.gateway<Record<string, unknown>>('/shelf/sync');
+    return {
+      books: (Array.isArray(r.books) ? r.books : []) as ShelfBook[],
+      albums: Array.isArray(r.albums) ? r.albums : [],
+      mp: r.mp,
+    };
   }
 
   /** 书架里的公众号（bookId 以 MP_WXS_ 开头） */
@@ -110,9 +114,9 @@ export async function fetchApiKey(http: HttpFn, cookie: string): Promise<string 
   );
   if (resp.status !== 200) return null;
   try {
-    const j = JSON.parse(resp.text);
-    const k = j?.apikey;
-    return typeof k === 'string' && k.startsWith('wrk-') ? k : null;
+    const j = parseJson(resp.text);
+    const k = pickStr(j, 'apikey');
+    return k.startsWith('wrk-') ? k : null;
   } catch {
     return null;
   }

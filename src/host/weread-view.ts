@@ -1,4 +1,6 @@
-import { ItemView, MarkdownRenderer, Notice, WorkspaceLeaf, setIcon } from 'obsidian';
+import { ItemView, MarkdownRenderer, Notice, WorkspaceLeaf, setIcon,
+  TFile,
+} from 'obsidian';
 import type WereadMpCatcher from '../main';
 
 export const VIEW_TYPE_WMC = 'wmc-library';
@@ -388,8 +390,8 @@ export class WmcView extends ItemView {
     const bodyEl = reader.createDiv('wmc-reader-body');
     if (r.archived && r.path) {
       const f = this.app.vault.getAbstractFileByPath(r.path);
-      if (f) {
-        const md = await this.app.vault.cachedRead(f as any);
+      if (f instanceof TFile) {
+        const md = await this.app.vault.cachedRead(f);
         bodyEl.addClass('markdown-rendered');
         await MarkdownRenderer.render(this.app, md, bodyEl, r.path, this);
         return;

@@ -42,8 +42,8 @@ const ENTITIES: Record<string, string> = {
 };
 
 export function decodeEntities(s: string): string {
-  let out = s.replace(/&#x([0-9a-f]+);/gi, (_m, h) => String.fromCodePoint(parseInt(h, 16)));
-  out = out.replace(/&#(\d+);/g, (_m, d) => String.fromCodePoint(parseInt(d, 10)));
+  let out = s.replace(/&#x([0-9a-f]+);/gi, (_m: string, h: string) => String.fromCodePoint(parseInt(h, 16)));
+  out = out.replace(/&#(\d+);/g, (_m: string, d: string) => String.fromCodePoint(parseInt(d, 10)));
   for (const [k, v] of Object.entries(ENTITIES)) out = out.split(k).join(v);
   return out;
 }
@@ -75,10 +75,10 @@ function stripJunk(html: string): string {
 
 function inlineToMd(s: string): string {
   let t = s;
-  t = t.replace(/<(strong|b)\b[^>]*>([\s\S]*?)<\/\1>/gi, (_m, _tag, inner) => `**${inner.trim()}**`);
-  t = t.replace(/<(em|i)\b[^>]*>([\s\S]*?)<\/\1>/gi, (_m, _tag, inner) => `*${inner.trim()}*`);
-  t = t.replace(/<code\b[^>]*>([\s\S]*?)<\/code>/gi, (_m, c) => '`' + c.trim() + '`');
-  t = t.replace(/<a\b[^>]*href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi, (_m, href, txt) => {
+  t = t.replace(/<(strong|b)\b[^>]*>([\s\S]*?)<\/\1>/gi, (_m: string, _tag: string, inner: string) => `**${inner.trim()}**`);
+  t = t.replace(/<(em|i)\b[^>]*>([\s\S]*?)<\/\1>/gi, (_m: string, _tag: string, inner: string) => `*${inner.trim()}*`);
+  t = t.replace(/<code\b[^>]*>([\s\S]*?)<\/code>/gi, (_m: string, c: string) => '`' + c.trim() + '`');
+  t = t.replace(/<a\b[^>]*href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi, (_m: string, href: string, txt: string) => {
     const label = txt.replace(/<[^>]+>/g, '').trim();
     return label ? `[${label}](${href})` : href;
   });
@@ -192,25 +192,25 @@ export function htmlToMarkdown(html: string): ConvertResult {
   });
 
   // 代码块（pre 里可能含 code 与 <br>）
-  text = text.replace(/<pre\b[^>]*>([\s\S]*?)<\/pre>/gi, (_m, inner) => {
+  text = text.replace(/<pre\b[^>]*>([\s\S]*?)<\/pre>/gi, (_m: string, inner: string) => {
     const code = decodeEntities(inner.replace(/<br\s*\/?>/gi, '\n').replace(/<[^>]+>/g, ''));
     return `\n\n\`\`\`\n${code.replace(/\n{3,}/g, '\n\n').trim()}\n\`\`\`\n\n`;
   });
 
   // 块级
-  text = text.replace(/<h([1-6])\b[^>]*>([\s\S]*?)<\/h\1>/gi, (_m, lv, inner) => {
+  text = text.replace(/<h([1-6])\b[^>]*>([\s\S]*?)<\/h\1>/gi, (_m: string, lv: string, inner: string) => {
     return `\n\n${'#'.repeat(Number(lv))} ${inlineToMd(inner).trim()}\n\n`;
   });
-  text = text.replace(/<blockquote\b[^>]*>([\s\S]*?)<\/blockquote>/gi, (_m, inner) => {
+  text = text.replace(/<blockquote\b[^>]*>([\s\S]*?)<\/blockquote>/gi, (_m: string, inner: string) => {
     const lines = inlineToMd(inner).trim().split('\n').filter((l) => l.trim());
     return `\n\n${lines.map((l) => '> ' + l.trim()).join('\n')}\n\n`;
   });
-  text = text.replace(/<li\b[^>]*>([\s\S]*?)<\/li>/gi, (_m, inner) => {
+  text = text.replace(/<li\b[^>]*>([\s\S]*?)<\/li>/gi, (_m: string, inner: string) => {
     const t = inlineToMd(inner).trim().replace(/\s*\n\s*/g, ' ');
     return `\n- ${t}\n`;
   });
   text = text.replace(/<\/?(ul|ol)\b[^>]*>/gi, '\n');
-  text = text.replace(/<p\b[^>]*>([\s\S]*?)<\/p>/gi, (_m, inner) => `\n\n${inlineToMd(inner).trim()}\n\n`);
+  text = text.replace(/<p\b[^>]*>([\s\S]*?)<\/p>/gi, (_m: string, inner: string) => `\n\n${inlineToMd(inner).trim()}\n\n`);
   text = text.replace(/<\/?(div|section|article|figure|figcaption|tbody|tr|td)\b[^>]*>/gi, '\n');
   text = text.replace(/<[^>]+>/g, '');
   text = decodeEntities(text);

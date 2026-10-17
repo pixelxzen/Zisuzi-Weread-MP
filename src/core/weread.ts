@@ -3,6 +3,8 @@
  * 依赖注入 httpRequest，便于在 Obsidian(requestUrl) 与 Node(fetch) 之间共用、并做单测。
  */
 
+import { isObj, parseJson, pickArr, pickNum, pickObj, pickStr } from './typed';
+
 export interface ArticleItem {
   reviewId: string;
   title: string;
@@ -99,14 +101,15 @@ export async function fetchCurrentUser(http: HttpFn, cookie: string): Promise<We
         Accept: 'application/json, text/plain, */*',
       });
       if (r.status !== 200 || !r.text.trim().startsWith('{')) continue;
-      const j: any = JSON.parse(r.text);
-      const name = j?.name || j?.userName || j?.nickName || j?.user?.name;
+      const j = parseJson(r.text);
+      const user = pickObj(j, 'user');
+      const name = pickStr(j, 'name', 'userName', 'nickName') || pickStr(user, 'name');
       if (!name) continue;
       return {
         name,
-        avatar: j?.avatar || j?.avatarUrl || j?.user?.avatar || '',
-        vid: String(j?.userVid ?? j?.vid ?? j?.user?.userVid ?? ''),
-        desc: j?.vDesc || j?.user?.vDesc || '',
+        avatar: pickStr(j, 'avatar', 'avatarUrl') || pickStr(user, 'avatar'),
+        vid: pickStr(j, 'userVid', 'vid') || pickStr(user, 'userVid'),
+        desc: pickStr(j, 'vDesc') || pickStr(user, 'vDesc'),
       };
     } catch {
       /* 试下一个 */
@@ -127,8 +130,13 @@ export async function fetchProfile(http: HttpFn, cookie: string): Promise<Weread
   });
   if (r.status !== 200) return null;
   try {
-    const j: any = JSON.parse(r.text);
-    return { name: j?.name || '', avatar: j?.avatar || '', vid: String(j?.userVid ?? vid), desc: j?.vDesc || '' };
+    const j = parseJson(r.text);
+    return {
+      name: pickStr(j, 'name'),
+      avatar: pickStr(j, 'avatar'),
+      vid: pickStr(j, 'userVid') || vid,
+      desc: pickStr(j, 'vDesc'),
+    };
   } catch {
     return null;
   }
@@ -154,11 +162,13 @@ export function describeRisk(code: number, what = ''): string {
   }
 }
 
-function assertNoRisk(json: any, what: string): void {
-  const code = json?.errcode ?? json?.errCode;
-  if (typeof code === 'number' && code !== 0) {
+function assertNoRisk(json: unknown, what: string): void {
+  // 服务端两种写法都出现过：errcode（小写 c）和 errCode（大写 C），漏判会把 -2012 吞掉
+  const raw = isObj(json) ? (json.errcode ?? json.errCode) : undefined;
+  const code = typeof raw === 'number' ? raw : 0;
+  if (code !== 0) {
     if (RISK_CODES.includes(code)) throw new RiskError(code, describeRisk(code, what));
-    throw new Error(`${what} 接口错误 ${code}: ${json?.errmsg ?? json?.errMsg ?? ''}`);
+    throw new Error(`${what} 接口错误 ${code}: ${pickStr(json, 'errmsg', 'errMsg')}`);
   }
 }
 
@@ -216,8 +226,9 @@ export async function probeAccess(http: HttpFn, cookie: string, bookId = 'mpbook
       code = -r.status;
     } else {
       try {
-        const j: any = JSON.parse(r.text);
-        code = typeof j?.errCode === 'number' ? j.errCode : typeof j?.errcode === 'number' ? j.errcode : 0;
+        const j = parseJson(r.text);
+        const raw = isObj(j) ? (j.errCode ?? j.errcode) : undefined;
+        code = typeof raw === 'number' ? raw : 0;
       } catch {
         code = -2;
       }
@@ -253,23 +264,25 @@ export async function probeAccess(http: HttpFn, cookie: string, bookId = 'mpbook
 }
 
 /** 解析一页列表响应 */
-export function parseArticleList(json: any): ArticleItem[] {
+export function parseArticleList(json: unknown): ArticleItem[] {
   const out: ArticleItem[] = [];
-  for (const rv of json?.reviews ?? []) {
-    for (const sub of rv?.subReviews ?? []) {
-      const r = sub?.review ?? {};
-      const info = r.mpInfo ?? {};
-      const rid: string = r.reviewId || '';
-      if (!rid) continue;
+  for (const rv of pickArr(json, 'reviews')) {
+    for (const sub of pickArr(rv, 'subReviews')) {
+      const review = pickObj(sub, 'review');
+      const info = pickObj(review, 'mpInfo');
+      const reviewId = pickStr(review, 'reviewId');
+      if (!reviewId) continue;
+      const readNum = pickNum(info, 'readNum');
+      const likeNum = pickNum(info, 'likeNum');
       out.push({
-        reviewId: rid,
-        title: info.title || '(无标题)',
-        time: Number(info.time ?? r.createTime ?? 0),
-        readNum: typeof info.readNum === 'number' ? info.readNum : undefined,
-        likeNum: typeof info.likeNum === 'number' ? info.likeNum : undefined,
-        picUrl: info.pic_url || info.picUrl || undefined,
-        digest: (info.content || '').trim() || undefined,
-        mpName: info.mp_name || '',
+        reviewId,
+        title: pickStr(info, 'title') || '(无标题)',
+        time: pickNum(info, 'time') || pickNum(review, 'createTime'),
+        readNum: readNum || undefined,
+        likeNum: likeNum || undefined,
+        picUrl: pickStr(info, 'pic_url', 'picUrl') || undefined,
+        digest: pickStr(info, 'content').trim() || undefined,
+        mpName: pickStr(info, 'mp_name'),
       });
     }
   }
@@ -288,12 +301,8 @@ export class WereadClient {
     const r = await this.http(url, this.headers());
     if (r.status === 0) throw new Error('列表 请求超时/无响应（20s）');
     if (r.status !== 200) throw new Error(`列表 HTTP ${r.status}`);
-    let json: any;
-    try {
-      json = JSON.parse(r.text);
-    } catch {
-      throw new Error('列表返回非 JSON（可能被拦）');
-    }
+    const json = parseJson(r.text);
+    if (json === null) throw new Error('列表返回非 JSON（可能被拦）');
     assertNoRisk(json, '列表');
     return parseArticleList(json);
   }
