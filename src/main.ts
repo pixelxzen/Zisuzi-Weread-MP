@@ -423,11 +423,23 @@ export default class WereadMpCatcher extends Plugin {
   /** 探测 Obsidian 自带 session 里是否有有效登录态（不依赖已移除的 electron.remote） */
   async probeSessionLogin(): Promise<boolean> {
     const UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
-    const probes = [
-      'https://weread.qq.com/web/shelf/sync?synckey=0',
-      'https://weread.qq.com/web/user?userVid=',
-    ];
-    for (const u of probes) {
+    const acc = this.settings.shelfAccounts[0] || this.settings.accounts[0];
+    // 首选判据：真的能拉到文章列表 —— 这才是我们要的能力
+    if (acc?.bookId) {
+      try {
+        const r = await this.rawHttp(
+          `https://weread.qq.com/web/mp/articles?bookId=${acc.bookId}&offset=0`,
+          { 'User-Agent': UA, Referer: `https://weread.qq.com/web/mp/${acc.bookId}`, Accept: 'application/json' },
+        );
+        if (r.status === 200 && /"subReviews"|"reviews"/.test(r.text) && !/"err(?:Code|code)"\s*:\s*-20\d\d/.test(r.text)) {
+          return true;
+        }
+      } catch {
+        /* 继续兜底 */
+      }
+    }
+    // 兜底：书架接口
+    for (const u of ['https://weread.qq.com/web/shelf/sync?synckey=0', 'https://weread.qq.com/web/user?userVid=']) {
       try {
         const r = await this.rawHttp(u, { 'User-Agent': UA, Referer: 'https://weread.qq.com/', Accept: 'application/json, text/plain, */*' });
         if (r.status !== 200) continue;
@@ -1021,50 +1033,81 @@ export default class WereadMpCatcher extends Plugin {
       cls: 'wmc-login-tip',
       text: '在下面窗口里用微信扫码。检测到登录态后会自动关闭并同步书架，不需要复制任何东西。',
     });
+    const status = box.createDiv({ cls: 'wmc-login-status', text: '等待扫码…' });
     const frame = box.createEl('iframe', { cls: 'wmc-login-frame' });
     frame.setAttr('src', 'https://weread.qq.com/');
     frame.setAttr('allow', 'clipboard-read; clipboard-write');
     this.loginPolling = true;
     modal.open();
 
+    // 手动兜底：探测卡住时用户可点这个立刻重试
+    let probeNow: (() => Promise<boolean>) | null = null;
+    const manual = box.createEl('button', { cls: 'wmc-hero-btn', text: '我已经扫码了，立即同步' });
+    manual.addEventListener('click', () => {
+      void (async () => {
+        status.setText('正在检测登录态…');
+        if (probeNow && (await probeNow())) return;
+        status.setText('还没检测到登录态，再等一下或重扫一次');
+      })();
+    });
+
+    let finished = false;
+    const finish = async (): Promise<boolean> => {
+      if (finished) return true;
+      // ① 老环境能直接读 cookie
+      const ck = await this.tryReadSessionCookie();
+      let ok = false;
+      if (ck && checkCookie(ck).ok) {
+        this.settings.cookie = normalizeCookie(ck);
+        this.settings.useSession = false;
+        ok = true;
+      }
+      // ② 读不到就走 session 探测（iframe 登录走这条）
+      if (!ok && (await this.probeSessionLogin())) {
+        this.settings.useSession = true;
+        ok = true;
+      }
+      if (!ok) return false;
+
+      finished = true;
+      this.loginPolling = false;
+      status.setText('登录成功，正在同步…');
+      try {
+        modal.close(); // 先关窗，用户在设置页就能看到信息卡刷新
+      } catch {
+        /* 用户已手动关闭 */
+      }
+      const key = await this.refreshApiKey().catch(() => null);
+      const prof = await this.refreshProfile().catch(() => null);
+      const n = await this.syncAccountsFromShelf().catch(() => 0);
+      const web = await this.checkWebLogin().catch(() => ({ ok: false, msg: '未知' }));
+      this.notifyViews();
+      this.renderStatus();
+      this.emitWatch();
+      new Notice(
+        `登录成功${prof?.name ? `：${prof.name}` : ''}${key ? ' · 已换出官方 Key' : ''}${
+          n ? ` · 书架 ${n} 个` : ''
+        }${web.ok ? ' · 列表可用' : ` · 列表仍不通：${web.msg}`}`,
+        web.ok ? 10000 : 16000,
+      );
+      return true;
+    };
+    probeNow = finish;
+
+    // 微信读书登录成功后会跳转页面 → iframe 触发 load，立刻探测一次
+    frame.addEventListener('load', () => {
+      void finish();
+    });
+
     void (async () => {
       const t0 = Date.now();
+      let tries = 0;
       while (this.loginPolling && Date.now() - t0 < 6 * 60 * 1000) {
-        await sleep(2500);
-        // ① 老环境能直接读 cookie
-        const ck = await this.tryReadSessionCookie();
-        let ok = false;
-        if (ck && checkCookie(ck).ok) {
-          this.settings.cookie = normalizeCookie(ck);
-          this.settings.useSession = false;
-          ok = true;
-        }
-        // ② 读不到就走 session 探测（iframe 登录走这条）
-        if (!ok && (await this.probeSessionLogin())) {
-          this.settings.useSession = true;
-          ok = true;
-        }
-        if (!ok) continue;
-        this.loginPolling = false;
-        try {
-          modal.close();
-        } catch {
-          /* 用户已手动关闭 */
-        }
-        const key = await this.refreshApiKey().catch(() => null);
-        const prof = await this.refreshProfile().catch(() => null);
-        const n = await this.syncAccountsFromShelf().catch(() => 0);
-        const web = await this.checkWebLogin().catch(() => ({ ok: false, msg: '未知' }));
-        this.notifyViews();
-        this.renderStatus();
-        this.emitWatch();
-        new Notice(
-          `登录成功${prof?.name ? `：${prof.name}` : ''}${key ? ' · 已换出官方 Key' : ''}${
-            n ? ` · 书架 ${n} 个` : ''
-          }${web.ok ? ' · 列表可用' : ` · 列表仍不通：${web.msg}`}`,
-          web.ok ? 10000 : 16000,
-        );
-        return;
+        await sleep(1800);
+        tries++;
+        if (finished) return;
+        if (tries % 3 === 0) status.setText(`等待扫码…（已检测 ${tries} 次，登录后会自动关闭）`);
+        if (await finish()) return;
       }
       this.loginPolling = false;
       try {

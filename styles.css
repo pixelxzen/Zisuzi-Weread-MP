@@ -2687,6 +2687,13 @@
   color: var(--text-muted);
 }
 
+
+.wmc-login-status {
+  font-size: 11.5px;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
 .wmc-login-frame {
   width: 100%;
   height: 68vh;
