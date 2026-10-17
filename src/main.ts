@@ -9,6 +9,7 @@ import {
   normalizePath,
   requestUrl,
   type RequestUrlParam,
+  setIcon,
 } from 'obsidian';
 import {
   WereadClient,
@@ -24,6 +25,7 @@ import {
 import { htmlToMarkdown, replaceImagePlaceholders, replaceMediaPlaceholders, safeFileName } from './core/html2md';
 import { WmcView, VIEW_TYPE_WMC } from './host/view-linear';
 import { BackfillModal } from './host/backfill-modal';
+import { ASSET_AVATAR, ASSET_MP_QR, ASSET_TIP_QR } from './core/assets';
 import type { BfItem, BfProgress, BfResult } from './core/bf';
 import { WereadAgentApi, fetchApiKey } from './core/weread-api';
 import {
@@ -550,7 +552,7 @@ export default class WereadMpCatcher extends Plugin {
     this.addCommand({
       id: 'backfill',
       name: '归档某个号的全部历史（分批·防风控）',
-      callback: () => new BackfillModal(this.app, this).open(),
+      callback: () => this.openBackfill(),
     });
 
     this.addSettingTab(new WMSettingTab(this.app, this));
@@ -1777,6 +1779,43 @@ export default class WereadMpCatcher extends Plugin {
   }
 
   /** 单号全量历史归档：逐篇状态可观测 + 网络抖动重试 + 风控熔断 */
+  /**
+   * 某号的历史归档库存（读本地缓存，不耗网络）。
+   * archived 用严格判据：processed 有记录【且】笔记文件仍在 vault 里。
+   */
+  getArchiveStats(accountName: string): { total: number; archived: number; remaining: number; known: boolean } {
+    const disc = this.state.discovered || {};
+    let total = 0;
+    let archived = 0;
+    for (const [rid, v] of Object.entries(disc)) {
+      if (v.account !== accountName) continue;
+      total++;
+      const rec = this.state.processed?.[rid];
+      if (rec?.path && this.app.vault.getAbstractFileByPath(rec.path)) archived++;
+    }
+    return { total, archived, remaining: Math.max(0, total - archived), known: total > 0 };
+  }
+
+  /** 归档弹窗单例：重复触发时先关旧的，避免叠出两个一模一样的窗口 */
+  private bfModal: BackfillModal | null = null;
+
+  openBackfill(preset?: string): void {
+    if (this.bfModal) {
+      try {
+        this.bfModal.close();
+      } catch {
+        /* 已关闭 */
+      }
+      this.bfModal = null;
+    }
+    const m = new BackfillModal(this.app, this, preset);
+    m.onClosed = () => {
+      if (this.bfModal === m) this.bfModal = null;
+    };
+    this.bfModal = m;
+    m.open();
+  }
+
   async runBackfill(
     acc: AccountRef,
     opts: { maxItems: number; fromDate: string; speed: 'safe' | 'slow'; only?: string[]; cached?: boolean },
@@ -1866,8 +1905,18 @@ export default class WereadMpCatcher extends Plugin {
       .slice(0, opts.maxItems > 0 ? opts.maxItems : tasks.length);
     const byId = new Map(tasks.map((t) => [t.reviewId, t]));
     const itemMap = new Map(scope.map((it) => [it.reviewId, it]));
-    const emit = (done: number, written: number) =>
-      onProgress({ phase: 'fetch', done, total: todo.length, written, items: tasks });
+    const emit = (done: number, written: number) => {
+      const archivedAll = tasks.filter((t) => t.state === 'done' || t.state === 'skipped').length;
+      onProgress({
+        phase: 'fetch',
+        done,
+        total: todo.length,
+        written,
+        items: tasks,
+        totalAll: tasks.length,
+        archivedAll,
+      });
+    };
 
     emit(0, 0);
     if (!todo.length) {
@@ -2556,6 +2605,54 @@ class WMSettingTab extends PluginSettingTab {
           this.display();
         }),
       );
+
+    this.renderAbout(containerEl);
+  }
+
+  /**
+   * 关于：作者信息 + 公众号 + 打赏。
+   * 全部手写 DOM（不用 Setting 行）；配色走 Obsidian 原生变量，自动适配明暗主题；
+   * 二维码用 webp base64 内嵌（插件分发不带额外文件，外链会 404）。
+   */
+  private renderAbout(containerEl: HTMLElement): void {
+    const wrap = containerEl.createDiv('wmc-about');
+    wrap.createDiv({ cls: 'wmc-settings-h', text: '关于' });
+
+    const card = wrap.createDiv('wmc-about-card');
+    const av = card.createEl('img', { cls: 'wmc-about-avatar' });
+    av.src = ASSET_AVATAR;
+    av.alt = '紫苏子ACG';
+
+    const info = card.createDiv('wmc-about-info');
+    info.createDiv({ cls: 'wmc-about-name', text: 'Zisuzi-Weread-MP' });
+    info.createDiv({ cls: 'wmc-about-ver', text: `v${this.plugin.manifest.version} · GPL-3.0-only` });
+    info.createDiv({ cls: 'wmc-about-by', text: '紫苏子ACG · 独立动画导演 · 尊胜精进院' });
+
+    const links = info.createDiv('wmc-about-links');
+    const addLink = (text: string, href: string) => {
+      const a = links.createEl('a', { cls: 'wmc-about-link', text });
+      a.href = href;
+      a.target = '_blank';
+      a.rel = 'noopener noreferrer';
+    };
+    addLink('GitHub', 'https://github.com/pixelxzen');
+    addLink('问题反馈', 'https://github.com/pixelxzen/Zisuzi-Weread-MP/issues');
+    addLink('更新日志', 'https://github.com/pixelxzen/Zisuzi-Weread-MP/releases');
+
+    const grid = wrap.createDiv('wmc-about-support');
+    const tile = (src: string, icon: string, title: string, sub: string) => {
+      const t = grid.createDiv('wmc-about-tile');
+      const head = t.createDiv('wmc-about-tile-head');
+      setIcon(head.createSpan('wmc-about-tile-ico'), icon);
+      head.createSpan({ text: title });
+      const img = t.createEl('img', { cls: 'wmc-about-qr' });
+      img.src = src;
+      img.alt = title;
+      img.loading = 'lazy';
+      t.createDiv({ cls: 'wmc-about-tile-sub', text: sub });
+    };
+    tile(ASSET_MP_QR, 'qr-code', '关注公众号', '扫码看更多作品与更新');
+    tile(ASSET_TIP_QR, 'coffee', '请我喝杯咖啡', '微信扫码支持持续维护');
   }
 
   /** 书架公众号选号器：搜索 + 勾选（分片渲染，支持上千个号） */

@@ -15,6 +15,10 @@ export interface BfItem {
 }
 
 export interface BfProgress {
+  /** 该号历史文章总数（本批扫描到的范围） */
+  totalAll?: number;
+  /** 其中已归档的数量（含历史已存在 + 本轮新归档） */
+  archivedAll?: number;
   phase: 'list' | 'fetch';
   done: number;
   total: number;

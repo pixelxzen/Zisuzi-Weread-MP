@@ -37,8 +37,14 @@ export class BackfillModal extends Modal {
   private useCache = true;
   private signal = { stop: false };
   private running = false;
+  /** 明细行缓存：reviewId → 行元素（增量更新，避免整表重建闪烁） */
+  private rowEls = new Map<string, HTMLElement>();
+  /** 上次渲染的状态签名，用于跳过未变化的行 */
+  private rowSig = new Map<string, string>();
 
   private progEl: HTMLElement | null = null;
+  /** 库存概览条（共 N 篇 · 已归档 X · 剩余 Y） */
+  private stockEl: HTMLElement | null = null;
   private stopBtn: HTMLButtonElement | null = null;
   private listEl: HTMLElement | null = null;
   private startedAt = 0;
@@ -90,6 +96,9 @@ export class BackfillModal extends Modal {
     sel.addEventListener('change', () => {
       this.picked = sel.value;
       this.items = [];
+      this.rowEls.clear();
+      this.rowSig.clear();
+      this.renderStock();
       this.renderProgIdle();
       this.listEl?.empty();
     });
@@ -112,6 +121,10 @@ export class BackfillModal extends Modal {
       this.fromDate = v;
     });
     addHint(dateVal, '留空 = 从最新往回抓');
+
+    /* --------------------------- 库存概览（不耗网络） --------------------------- */
+    this.stockEl = contentEl.createDiv('wmc-bf-stock');
+    this.renderStock();
 
     /* ---------------------------- 组 2：抓取节奏 ---------------------------- */
     const g2 = contentEl.createDiv('wmc-bf-group');
@@ -198,6 +211,27 @@ export class BackfillModal extends Modal {
     start.addEventListener('click', () => void this.start());
   }
 
+  /** 库存概览：告诉用户这个号一共多少篇、已归档多少、还剩多少 */
+  private renderStock(): void {
+    const el = this.stockEl;
+    if (!el) return;
+    el.empty();
+    const st = this.plugin.getArchiveStats(this.picked);
+    if (!st.known) {
+      const t = el.createDiv('wmc-bf-stock-empty');
+      t.createSpan({ text: '这个号还没同步过历史列表 —— 点「开始归档」会先翻列表，翻完就知道一共多少篇' });
+      return;
+    }
+    const num = (cls: string, n: number, label: string) => {
+      const b = el.createDiv(`wmc-bf-stock-item ${cls}`);
+      b.createSpan({ cls: 'wmc-bf-stock-n', text: String(n) });
+      b.createSpan({ cls: 'wmc-bf-stock-l', text: label });
+    };
+    num('is-all', st.total, '共发现');
+    num('is-ok', st.archived, '已归档');
+    num(st.remaining > 0 ? 'is-todo' : 'is-ok', st.remaining, st.remaining > 0 ? '未归档' : '全部完成');
+  }
+
   private renderProgIdle(): void {
     const el = this.progEl;
     if (!el) return;
@@ -223,6 +257,8 @@ export class BackfillModal extends Modal {
     if (this.stopBtn) this.stopBtn.disabled = false;
     this.startedAt = Date.now();
     this.items = [];
+    this.rowEls.clear();
+    this.rowSig.clear();
     this.listEl?.empty();
     this.progEl?.empty();
 
@@ -236,6 +272,7 @@ export class BackfillModal extends Modal {
     this.running = false;
     if (this.stopBtn) this.stopBtn.disabled = true;
     this.items = res.items;
+    this.renderStock();
     this.renderProgress({
       phase: 'fetch',
       done: res.items.length,
@@ -289,6 +326,9 @@ export class BackfillModal extends Modal {
       return;
     }
 
+    // 关键：runBackfill 每次回调都带着完整 items（同一数组、状态原地变化），
+    // 之前没有回写 this.items，导致明细区在整个抓取过程中一直是空列表。
+    if (p.items?.length) this.items = p.items;
     const done = p.items.filter((i) => i.state === 'done').length;
     const failed = p.items.filter((i) => i.state === 'failed').length;
     const skipped = p.items.filter((i) => i.state === 'skipped').length;
@@ -322,33 +362,97 @@ export class BackfillModal extends Modal {
     chip('is-ok', 'check', `已归档 ${done}`);
     if (skipped) chip('is-skip', 'minus', `已存在 ${skipped}`);
     if (failed) chip('is-bad', 'alert-triangle', `失败 ${failed}`);
+    // 库存口径：总数 - 已归档（skipped 含历史已归档，done 是本轮新归档）
+    if (typeof p.totalAll === 'number' && p.totalAll > 0) {
+      const arch = p.archivedAll ?? 0;
+      const rest = Math.max(0, p.totalAll - arch);
+      el.createDiv({ cls: 'wmc-bf-stockline' }).setText(
+        `这个号共 ${p.totalAll} 篇 · 已归档 ${arch} · 未归档 ${rest}`,
+      );
+    }
 
     this.renderItems();
   }
 
+  /**
+   * 增量渲染明细列表：
+   * 首次建全量行（pending 态），此后每次只重画状态变了的行。
+   * 全量重建会导致「每篇完成都闪一下 + 滚动位置乱跳」，100 篇时尤其明显。
+   */
   private renderItems(): void {
     const el = this.listEl;
     if (!el) return;
-    el.empty();
+
     if (!this.items.length) {
+      el.empty();
+      this.rowEls.clear();
+      this.rowSig.clear();
       el.createDiv({ cls: 'wmc-bf-list-empty', text: '点「开始归档」后，这里会逐篇显示每篇的状态' });
       return;
     }
-    for (const it of this.items) {
-      const row = el.createDiv(`wmc-bf-row is-${it.state}`);
-      const ico = row.createSpan({ cls: 'wmc-bf-ico' + (it.state === 'running' ? ' is-spin' : '') });
-      setIcon(ico, ICON[it.state] ?? 'circle');
-      row.createSpan({ cls: 'wmc-bf-name', text: it.title || '(无标题)' });
-      if (it.ms) row.createSpan({ cls: 'wmc-bf-time', text: `${(it.ms / 1000).toFixed(1)}s` });
-      const tag = row.createSpan({ cls: `wmc-bf-tag is-${it.state}` });
-      tag.setText(it.note || STATE_LABEL[it.state]);
+
+    // 条目集合变了（新一批 / 重试白名单）→ 全量重建一次
+    const needRebuild =
+      this.rowEls.size !== this.items.length || this.items.some((it) => !this.rowEls.has(it.reviewId));
+
+    if (needRebuild) {
+      el.empty();
+      this.rowEls.clear();
+      this.rowSig.clear();
+      for (const it of this.items) {
+        const row = el.createDiv(`wmc-bf-row is-${it.state}`);
+        const ico = row.createSpan('wmc-bf-ico');
+        row.createSpan({ cls: 'wmc-bf-name', text: it.title || '(无标题)' });
+        const time = row.createSpan('wmc-bf-time');
+        const tag = row.createSpan('wmc-bf-tag');
+        this.rowEls.set(it.reviewId, row);
+        this.paintRow(it, row, ico, time, tag);
+      }
+      return;
     }
-    const running = el.querySelector('.wmc-bf-row.is-running') as HTMLElement | null;
-    if (running) running.scrollIntoView({ block: 'nearest' });
+
+    // 只更新有变化的行
+    let movedTo: HTMLElement | null = null;
+    for (const it of this.items) {
+      const sig = `${it.state}|${it.ms ?? 0}|${it.note ?? ''}`;
+      if (this.rowSig.get(it.reviewId) === sig) continue;
+      const row = this.rowEls.get(it.reviewId);
+      if (!row) continue;
+      const ico = row.querySelector('.wmc-bf-ico') as HTMLElement | null;
+      const time = row.querySelector('.wmc-bf-time') as HTMLElement | null;
+      const tag = row.querySelector('.wmc-bf-tag') as HTMLElement | null;
+      if (!ico || !time || !tag) continue;
+      this.paintRow(it, row, ico, time, tag);
+      if (it.state === 'running') movedTo = row;
+    }
+
+    // 跟随正在抓的那一行（只在有新 running 行时滚，避免抖动）
+    if (movedTo) {
+      try {
+        movedTo.scrollIntoView({ block: 'nearest' });
+      } catch {
+        /* 老 Electron 不支持该选项时忽略 */
+      }
+    }
   }
+
+  private paintRow(it: BfItem, row: HTMLElement, ico: HTMLElement, time: HTMLElement, tag: HTMLElement): void {
+    row.className = `wmc-bf-row is-${it.state}`;
+    ico.className = `wmc-bf-ico${it.state === 'running' ? ' is-spin' : ''}`;
+    ico.empty();
+    setIcon(ico, ICON[it.state] ?? 'circle');
+    time.setText(it.ms ? `${(it.ms / 1000).toFixed(1)}s` : '');
+    tag.className = `wmc-bf-tag is-${it.state}`;
+    tag.setText(it.note || STATE_LABEL[it.state]);
+    this.rowSig.set(it.reviewId, `${it.state}|${it.ms ?? 0}|${it.note ?? ''}`);
+  }
+
+  /** 关闭后通知宿主，用于清掉单例引用 */
+  onClosed?: () => void;
 
   onClose(): void {
     this.signal.stop = true;
     this.contentEl.empty();
+    this.onClosed?.();
   }
 }
