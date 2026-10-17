@@ -62,6 +62,7 @@ export interface WMSettings {
   theme: 'linear' | 'brand';
   maxMediaMB: number;
   panelOpen: boolean;
+  agent: AgentSettings;
   outputDir: string;
   listWidth: number;
   llm: LLMSettings;
@@ -112,6 +113,7 @@ const DEFAULTS: WMSettings = {
   theme: 'linear',
   maxMediaMB: 50,
   panelOpen: false,
+  agent: { preset: 'hermes', cmd: '', args: [], cwd: '' },
   outputDir: '微信读书公众号',
   listWidth: 300,
   llm: { ...LLM_DEFAULTS },
@@ -150,6 +152,40 @@ function guessExt(buf: ArrayBuffer): string {
   if (b[0] === 0x52 && b[1] === 0x49 && b[8] === 0x57) return 'webp';
   return 'jpg';
 }
+
+/* ------------------------------ 本地 Agent 适配层 ------------------------------ */
+
+export interface AgentSettings {
+  preset: string;
+  cmd: string;
+  args: string[];
+  cwd: string;
+}
+
+export interface AgentPreset {
+  id: string;
+  label: string;
+  cmd: string;
+  args: string[];
+  hint: string;
+}
+
+/** 每个预设的 args 里 {prompt} 会被替换成用户输入 */
+export const AGENT_PRESETS: AgentPreset[] = [
+  { id: 'hermes', label: 'Hermes（默认）', cmd: 'hermes', args: ['-z', '{prompt}'], hint: 'hermes -z "<prompt>"' },
+  {
+    id: 'claude',
+    label: 'Claude Code',
+    cmd: 'claude',
+    args: ['-p', '{prompt}', '--output-format', 'text'],
+    hint: 'claude -p "<prompt>" --output-format text',
+  },
+  { id: 'codex', label: 'Codex CLI', cmd: 'codex', args: ['exec', '{prompt}'], hint: 'codex exec "<prompt>"' },
+  { id: 'kimi', label: 'Kimi CLI', cmd: 'kimi', args: ['-p', '{prompt}'], hint: 'kimi -p "<prompt>"' },
+  { id: 'gemini', label: 'Gemini CLI', cmd: 'gemini', args: ['-p', '{prompt}'], hint: 'gemini -p "<prompt>"' },
+  { id: 'cursor', label: 'Cursor Agent', cmd: 'cursor-agent', args: ['-p', '{prompt}'], hint: 'cursor-agent -p "<prompt>"' },
+  { id: 'custom', label: '自定义命令', cmd: '', args: [], hint: '自己填命令，{prompt} 是占位符' },
+];
 
 /* --------------------------------- plugin --------------------------------- */
 
@@ -577,6 +613,53 @@ export default class WereadMpCatcher extends Plugin {
     }
     t.hide();
     new Notice(`补全完成：${broken.length} 篇 · 共下载 ${totalOk} 张图`, 10000);
+  }
+
+  /** 跑一遍本地 Agent CLI（流式回调）。默认 Hermes，可切 Claude Code / Codex / Kimi / Gemini / Cursor / 自定义 */
+  async runAgent(prompt: string, onChunk?: (t: string) => void): Promise<{ code: number; out: string; err: string; cmd: string }> {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const cp = (window as any).require?.('child_process');
+    if (!cp?.spawn) throw new Error('当前环境不支持执行本地命令（仅桌面端可用）');
+
+    const cfg = this.settings.agent || { preset: 'hermes', cmd: '', args: [], cwd: '' };
+    const preset = AGENT_PRESETS.find((p) => p.id === cfg.preset) || AGENT_PRESETS[0];
+    const cmd = (cfg.preset === 'custom' && cfg.cmd ? cfg.cmd : preset.cmd).trim();
+    const rawArgs = cfg.preset === 'custom' && cfg.args?.length ? cfg.args : preset.args;
+    if (!cmd) throw new Error('还没配置 Agent 命令');
+    const args = rawArgs.map((a) => a.replace('{prompt}', prompt));
+
+    // Obsidian 是 GUI 进程，PATH 往往只有 /usr/bin:/bin —— 必须手工补全
+    const home = (window as any).require?.('os')?.homedir?.() || '';
+    const baseEnv = (window as any).process?.env || {};
+    const env = {
+      ...baseEnv,
+      PATH: ['/opt/homebrew/bin', '/usr/local/bin', home ? `${home}/.local/bin` : '', home ? `${home}/.kimi-code/bin` : '', '/usr/bin', '/bin', '/usr/sbin', '/sbin']
+        .filter(Boolean)
+        .join(':'),
+    };
+    const cwd = cfg.cwd || (this.app.vault.adapter as any).getBasePath?.() || undefined;
+
+    return new Promise((resolve) => {
+      let out = '';
+      let err = '';
+      let child: any;
+      try {
+        child = cp.spawn(cmd, args, { cwd, env });
+      } catch (e) {
+        resolve({ code: -1, out: '', err: String(e), cmd });
+        return;
+      }
+      child.stdout?.on('data', (d: any) => {
+        const s = d.toString();
+        out += s;
+        onChunk?.(s);
+      });
+      child.stderr?.on('data', (d: any) => {
+        err += d.toString();
+      });
+      child.on('error', (e: any) => resolve({ code: -1, out, err: `${err}\n${String(e)}`.trim(), cmd }));
+      child.on('close', (code: number) => resolve({ code: code ?? -1, out, err, cmd }));
+    });
   }
 
   /* ------------------------------ 扫码登录 ------------------------------ */
@@ -1425,6 +1508,75 @@ class WMSettingTab extends PluginSettingTab {
       );
 
     /* 2. 公众号：搜索 + 勾选 */
+    containerEl.createEl('h3', { text: '本地 Agent' });
+    const agentPreset =
+      AGENT_PRESETS.find((p) => p.id === this.plugin.settings.agent.preset) || AGENT_PRESETS[0];
+    new Setting(containerEl)
+      .setName('Agent 类型')
+      .setDesc('插件会调用这个本地 CLI 干活（读笔记、写笔记、跑命令）。默认 Hermes，也可换成你已装的其他 Agent。')
+      .addDropdown((dd) => {
+        for (const p of AGENT_PRESETS) dd.addOption(p.id, p.label);
+        dd.setValue(agentPreset.id);
+        dd.onChange(async (v) => {
+          this.plugin.settings.agent.preset = v;
+          await this.plugin.saveAll();
+          this.display();
+        });
+      })
+      .addButton((b) =>
+        b.setButtonText('测试连接').onClick(async () => {
+          const t = new Notice('正在测试 Agent…', 0);
+          try {
+            const r = await this.plugin.runAgent('只回四个字：在线可用');
+            t.hide();
+            new Notice(
+              r.code === 0
+                ? `可用 · 返回：${r.out.trim().slice(0, 60)}`
+                : `失败（退出码 ${r.code}）：${(r.err || '无错误输出').slice(0, 140)}`,
+              10000,
+            );
+          } catch (e) {
+            t.hide();
+            new Notice(`失败：${e instanceof Error ? e.message : String(e)}`, 9000);
+          }
+        }),
+      );
+    containerEl.createEl('p', {
+      cls: 'setting-item-description',
+      text: `实际执行：${agentPreset.hint}`,
+    });
+
+    if (this.plugin.settings.agent.preset === 'custom') {
+      new Setting(containerEl)
+        .setName('命令')
+        .setDesc('要执行的程序，例如 /usr/local/bin/my-agent')
+        .addText((t) =>
+          t.setValue(this.plugin.settings.agent.cmd).onChange(async (v) => {
+            this.plugin.settings.agent.cmd = v;
+            await this.plugin.saveAll();
+          }),
+        );
+      new Setting(containerEl)
+        .setName('参数')
+        .setDesc('空格分隔，用 {prompt} 代表提问内容，例如 --json {prompt}')
+        .addText((t) =>
+          t.setValue(this.plugin.settings.agent.args.join(' ')).onChange(async (v) => {
+            this.plugin.settings.agent.args = v.split(/\s+/).filter(Boolean);
+            await this.plugin.saveAll();
+          }),
+        );
+    }
+
+    new Setting(containerEl)
+      .setName('工作目录')
+      .setDesc('Agent 执行时的当前目录；留空 = 当前库根目录')
+      .addText((t) =>
+        t.setValue(this.plugin.settings.agent.cwd).onChange(async (v) => {
+          this.plugin.settings.agent.cwd = v.trim();
+          await this.plugin.saveAll();
+        }),
+      );
+
     containerEl.createEl('h3', { text: '盯采公众号' });
     this.renderPicker(containerEl);
 

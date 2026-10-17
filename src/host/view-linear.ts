@@ -1,6 +1,7 @@
 import { ItemView, MarkdownRenderer, Notice, WorkspaceLeaf, setIcon } from 'obsidian';
 import type WereadMpCatcher from '../main';
 import type { WatchStatus } from '../main';
+import { AGENT_PRESETS } from '../main';
 import { BackfillModal } from './backfill-modal';
 
 export const VIEW_TYPE_WMC = 'wmc-library';
@@ -20,7 +21,7 @@ export interface RowItem {
   summary?: string;
 }
 
-type Mode = 'list' | 'detail' | 'stats';
+type Mode = 'list' | 'detail' | 'stats' | 'agent';
 type Tab = 'body' | 'ai' | 'origin';
 type Layout = 'card' | 'feed' | 'official' | 'compact';
 type ReadFilter = 'all' | 'unread';
@@ -72,6 +73,8 @@ export class WmcView extends ItemView {
   private unsubWatch: (() => void) | null = null;
   private logOpen = false;
   private panelQuery = '';
+  private agentOut = '';
+  private agentBusy = false;
 
   private get panelOpen(): boolean {
     return !!this.plugin.settings.panelOpen;
@@ -217,6 +220,7 @@ export class WmcView extends ItemView {
     this.applyTheme();
     if (this.mode === 'list') this.renderList();
     else if (this.mode === 'detail') void this.renderDetail();
+    else if (this.mode === 'agent') this.renderAgent();
     else this.renderStats();
   }
 
@@ -236,6 +240,10 @@ export class WmcView extends ItemView {
 
     bar.createDiv('wmc-spacer').style.flex = '1';
 
+    this.iconBtn(bar, 'bot', '本地 Agent', () => {
+      this.mode = this.mode === 'agent' ? 'list' : 'agent';
+      this.render();
+    });
     this.iconBtn(bar, 'radar', this.panelOpen ? '关闭盯采管理' : '盯采管理', () => {
       this.panelOpen = !this.panelOpen;
       this.render();
@@ -661,6 +669,72 @@ export class WmcView extends ItemView {
   private heroBtn(parent: HTMLElement, text: string, primary: boolean, onClick: () => void): void {
     const b = parent.createEl('button', { cls: `wmc-hero-btn${primary ? ' is-primary' : ''}`, text });
     b.addEventListener('click', onClick);
+  }
+
+  /* ------------------------------ 本地 Agent ------------------------------ */
+
+  private renderAgent(): void {
+    const root = this.contentEl;
+    this.header(root);
+    const cfg = this.plugin.settings.agent;
+    const label = (AGENT_PRESETS.find((p) => p.id === cfg.preset) || AGENT_PRESETS[0]).label;
+
+    const wrap = root.createDiv('wmc-agent');
+    const bar = wrap.createDiv('wmc-agent-bar');
+    const who = bar.createSpan('wmc-agent-who');
+    const ico = who.createSpan('wmc-agent-ico');
+    setIcon(ico, 'bot');
+    who.createSpan({ text: `本地 Agent · ${label}` });
+    bar.createSpan({ cls: 'wmc-agent-hint', text: '在设置 → 本地 Agent 里可切换 Hermes / Claude Code / Codex 等' });
+
+    const out = wrap.createDiv('wmc-agent-out');
+    out.setText(this.agentOut || '在下面提问。Agent 会直接在你的库里动手：读笔记、写笔记、跑命令。');
+
+    const inputRow = wrap.createDiv('wmc-agent-input');
+    const ta = inputRow.createEl('textarea', {
+      cls: 'wmc-agent-textarea',
+      placeholder: '例如：把本周 AI 硬件相关的文章整理成一篇综述笔记，放在 5-剪藏笔记 下',
+    });
+    const send = inputRow.createEl('button', {
+      cls: `wmc-hero-btn${this.agentBusy ? '' : ' is-primary'}`,
+      text: this.agentBusy ? '运行中…' : '发送',
+    });
+    (send as HTMLButtonElement).disabled = this.agentBusy;
+    send.addEventListener('click', () => void this.runAgentPrompt(ta.value, out));
+    ta.addEventListener('keydown', (ev) => {
+      if ((ev.metaKey || ev.ctrlKey) && ev.key === 'Enter') void this.runAgentPrompt(ta.value, out);
+    });
+  }
+
+  private async runAgentPrompt(q: string, out: HTMLElement): Promise<void> {
+    const prompt = q.trim();
+    if (!prompt || this.agentBusy) return;
+    this.agentBusy = true;
+    this.agentOut = '';
+    out.setText('启动中…');
+    try {
+      const r = await this.plugin.runAgent(prompt, (chunk) => {
+        this.agentOut += chunk;
+        out.setText(this.agentOut);
+        out.scrollTop = out.scrollHeight;
+      });
+      if (r.code !== 0) {
+        const tail = (r.err || '').split('\n').filter(Boolean).slice(-3).join('\n');
+        this.agentOut += `\n\n[退出码 ${r.code}]${tail ? `\n${tail}` : ''}`;
+      } else if (!this.agentOut.trim()) {
+        this.agentOut = '（Agent 没有返回内容）';
+      }
+      out.setText(this.agentOut);
+    } catch (e) {
+      this.agentOut = `出错：${e instanceof Error ? e.message : String(e)}`;
+      out.setText(this.agentOut);
+    }
+    this.agentBusy = false;
+    const send = this.contentEl.querySelector('.wmc-agent-input button') as HTMLButtonElement | null;
+    if (send) {
+      send.disabled = false;
+      send.setText('发送');
+    }
   }
 
   private item(r: RowItem): HTMLElement {

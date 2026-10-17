@@ -2224,6 +2224,100 @@
   background: color-mix(in srgb, var(--wmc-brand, #474980) 88%, #fff);
 }
 
+/* ===================== v1.1.0 本地 Agent 面板 ===================== */
+
+.wmc-root .wmc-agent {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+  padding: 12px 14px 14px;
+  gap: 10px;
+}
+
+.wmc-agent-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 0 0 auto;
+}
+
+.wmc-agent-who {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--wmc-ink-1, var(--text-normal));
+}
+
+.wmc-agent-ico {
+  display: inline-flex;
+  color: var(--wmc-brand, #474980);
+}
+
+.wmc-agent-ico .svg-icon {
+  width: 15px;
+  height: 15px;
+}
+
+.wmc-agent-hint {
+  font-size: 11px;
+  color: var(--wmc-ink-3, var(--text-faint));
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.wmc-root .wmc-agent-out {
+  flex: 1 1 auto;
+  min-height: 160px;
+  overflow-y: auto;
+  padding: 12px 14px;
+  border: 1px solid color-mix(in srgb, var(--wmc-brand, #474980) 7%, transparent);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--wmc-brand, #474980) 2.5%, var(--background-primary));
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12.5px;
+  line-height: 1.7;
+  color: var(--wmc-ink-2, var(--text-muted));
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.wmc-agent-input {
+  display: flex;
+  gap: 8px;
+  align-items: flex-end;
+  flex: 0 0 auto;
+}
+
+.wmc-agent-textarea {
+  flex: 1 1 auto;
+  min-height: 64px;
+  max-height: 160px;
+  padding: 9px 11px;
+  border: 1px solid var(--wmc-line, var(--background-modifier-border));
+  border-radius: 9px;
+  background: var(--wmc-bg-2, var(--background-secondary));
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--wmc-ink-1, var(--text-normal));
+  resize: vertical;
+  box-shadow: none;
+}
+
+.wmc-agent-textarea:focus {
+  border-color: color-mix(in srgb, var(--wmc-brand, #474980) 45%, transparent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--wmc-brand, #474980) 14%, transparent);
+  outline: none;
+}
+
+.wmc-agent-input .wmc-hero-btn {
+  flex: 0 0 auto;
+  height: 36px;
+}
+
 /* ------------------------- v0.8.0 盯采面板（左侧抽屉） ------------------------- */
 
 .wmc-root {
