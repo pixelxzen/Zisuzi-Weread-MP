@@ -5,6 +5,7 @@ import {
   Plugin,
   PluginSettingTab,
   Setting,
+  TFile,
   normalizePath,
   requestUrl,
   type RequestUrlParam,
@@ -327,6 +328,16 @@ export default class WereadMpCatcher extends Plugin {
       callback: () => this.openLoginWindow(),
     });
     this.addCommand({
+      id: 'repair-images',
+      name: '补全当前笔记的图片（重新采集）',
+      callback: () => void this.repairActiveNote(),
+    });
+    this.addCommand({
+      id: 'repair-all-images',
+      name: '补全所有缺图笔记（批量重新采集）',
+      callback: () => void this.repairAllNotes(),
+    });
+    this.addCommand({
       id: 'toggle-theme',
       name: '切换界面主题（Linear ⇄ 紫苏子品牌）',
       callback: async () => {
@@ -453,6 +464,119 @@ export default class WereadMpCatcher extends Plugin {
     this.settings.cookie = ck;
     await this.saveAll();
     return true;
+  }
+
+  /* ------------------------------ 补图 / 再采集 ------------------------------ */
+
+  /**
+   * 修复一篇笔记的图片：从 source 里的 reviewId 重新拉正文，下载全部图片，
+   * 再把笔记里的图片链接重写为带尖括号的相对路径（路径含空格时必需）。
+   */
+  async repairNote(f: TFile): Promise<{ ok: number; fail: number; total: number }> {
+    const md = await this.app.vault.read(f);
+    const m = /^source:\s*"?weread:\/\/([^"\n]+)"?/m.exec(md);
+    if (!m) throw new Error('这篇笔记里没有 weread 来源标记，无法定位原文');
+    const reviewId = m[1].trim();
+    const cookie = normalizeCookie(this.settings.cookie || '');
+    if (!checkCookie(cookie).ok) throw new Error('登录态无效，请先去设置里扫码登录');
+
+    const client = new WereadClient(this.http, cookie);
+    const html = await client.getContentHtml(reviewId);
+    const { images } = htmlToMarkdown(html);
+    if (!images.length) throw new Error('正文里没有找到图片');
+
+    const base = safeFileName(f.basename);
+    const parentDir = f.parent?.path && f.parent.path !== '/' ? f.parent.path : this.settings.outputDir;
+    const assetDir = normalizePath(`${parentDir}/assets/${base}`);
+    await this.ensureFolder(assetDir);
+
+    const localRel: string[] = [];
+    let ok = 0;
+    let fail = 0;
+    for (let i = 0; i < images.length; i++) {
+      try {
+        const buf = await client.fetchImage(images[i].src);
+        const ext = guessExt(buf);
+        const name = `img-${String(i + 1).padStart(2, '0')}.${ext}`;
+        await this.app.vault.adapter.writeBinary(normalizePath(`${assetDir}/${name}`), buf);
+        localRel.push(normalizePath(`assets/${base}/${name}`));
+        ok++;
+      } catch {
+        localRel.push('');
+        fail++;
+      }
+      await sleep(Math.max(600, this.settings.delayContentMs));
+    }
+
+    let idx = 0;
+    const rewritten = md.replace(/!\[([^\]]*)\]\([^)]*\)/g, (whole, alt) => {
+      const rel = localRel[idx++];
+      if (!rel) return whole;
+      return `![${alt || 'img'}](<${rel}>)`;
+    });
+    await this.app.vault.modify(f, rewritten);
+    return { ok, fail, total: images.length };
+  }
+
+  async repairActiveNote(): Promise<void> {
+    const f = this.app.workspace.getActiveFile();
+    if (!f || f.extension !== 'md') {
+      new Notice('先打开一篇公众号笔记，再运行这个命令');
+      return;
+    }
+    const t = new Notice(`正在补全「${f.basename.slice(0, 20)}…」的图片`, 0);
+    try {
+      const r = await this.repairNote(f);
+      t.hide();
+      new Notice(`补全完成：成功 ${r.ok} / 共 ${r.total} 张${r.fail ? `，失败 ${r.fail}` : ''}`, 8000);
+    } catch (e) {
+      t.hide();
+      new Notice(`补全失败：${e instanceof Error ? e.message : String(e)}`, 8000);
+    }
+  }
+
+  /** 扫描笔记里指向不存在文件的图片，逐篇重采 */
+  async repairAllNotes(): Promise<void> {
+    const folder = this.app.vault.getAbstractFileByPath(this.settings.outputDir);
+    const files: TFile[] = [];
+    const walk = (node: any) => {
+      if (node instanceof TFile) {
+        if (node.extension === 'md') files.push(node);
+        return;
+      }
+      for (const child of node?.children || []) walk(child);
+    };
+    if (folder) walk(folder);
+    if (!files.length) {
+      new Notice(`「${this.settings.outputDir}」下没有笔记`);
+      return;
+    }
+
+    const broken: TFile[] = [];
+    for (const f of files) {
+      const md = await this.app.vault.cachedRead(f);
+      const links = [...md.matchAll(/!\[[^\]]*\]\(<?([^)>\n]+)>?\)/g)].map((m) => m[1]);
+      const missing = links.some((p) => !p.startsWith('http') && !this.app.vault.getAbstractFileByPath(normalizePath(p)));
+      if (missing) broken.push(f);
+    }
+    if (!broken.length) {
+      new Notice('没有发现缺图的笔记 🎉');
+      return;
+    }
+
+    const t = new Notice(`发现 ${broken.length} 篇缺图，开始补全…`, 0);
+    let totalOk = 0;
+    for (const f of broken) {
+      try {
+        const r = await this.repairNote(f);
+        totalOk += r.ok;
+      } catch {
+        /* 单篇失败继续 */
+      }
+      await sleep(1500);
+    }
+    t.hide();
+    new Notice(`补全完成：${broken.length} 篇 · 共下载 ${totalOk} 张图`, 10000);
   }
 
   /* ------------------------------ 扫码登录 ------------------------------ */
