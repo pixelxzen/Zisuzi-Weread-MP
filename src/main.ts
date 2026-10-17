@@ -165,6 +165,7 @@ export interface WatchStatus {
   account?: string;
   accountIndex: number;
   accountTotal: number;
+  queueTotal: number;
   found: number;
   written: number;
   skipped: number;
@@ -188,6 +189,7 @@ export default class WereadMpCatcher extends Plugin {
     phase: 'idle',
     accountIndex: 0,
     accountTotal: 0,
+    queueTotal: 0,
     found: 0,
     written: 0,
     skipped: 0,
@@ -644,7 +646,7 @@ export default class WereadMpCatcher extends Plugin {
     this.registerInterval(this.timer);
     this.watch.running = true;
     this.watch.nextRunAt = Date.now() + min * 60 * 1000;
-    this.pushLog(`盯采已开启 · 每 ${min} 分钟一轮`, 'ok');
+    this.pushLog(`自动更新已开启 · 每 ${min} 分钟看一次`, 'ok');
     this.emitWatch();
     this.renderStatus();
     if (notify) new Notice(`自动盯采已开启：每 ${min} 分钟一轮`);
@@ -657,7 +659,7 @@ export default class WereadMpCatcher extends Plugin {
     }
     this.watch.running = false;
     this.watch.nextRunAt = undefined;
-    this.pushLog('盯采已停止', 'warn');
+    this.pushLog('自动更新已暂停', 'warn');
     this.emitWatch();
     this.renderStatus();
     if (notify) new Notice('自动盯采已停止');
@@ -707,7 +709,7 @@ export default class WereadMpCatcher extends Plugin {
     this.watch.written = 0;
     this.watch.skipped = 0;
     this.watch.lastError = undefined;
-    this.pushLog(`新一轮开始 · ${accounts.length} 个号`);
+    this.pushLog(`开始更新 · 检查 ${accounts.length} 个公众号`);
     this.emitWatch();
     const client = new WereadClient(this.http, cookie);
     let found = 0;
@@ -784,6 +786,7 @@ export default class WereadMpCatcher extends Plugin {
       for (const job of queue) {
         if (riskHit) break;
         this.watch.phase = 'fetch';
+        this.watch.queueTotal = queue.length;
         this.watch.account = job.acc.name;
         this.emitWatch();
         try {
@@ -832,7 +835,7 @@ export default class WereadMpCatcher extends Plugin {
       this.watch.lastRunAt = Date.now();
       const min = Math.max(MIN_INTERVAL, Math.round(this.settings.intervalMin || 30));
       this.watch.nextRunAt = this.timer !== null ? Date.now() + min * 60 * 1000 : undefined;
-      this.pushLog(`本轮完成 · +${written} 落盘 / ${found} 新 / ${skipped} 跳过`, written > 0 ? 'ok' : 'info');
+      this.pushLog(written > 0 ? `这一轮收了 ${written} 篇新文章` : '这一轮没有新文章', written > 0 ? 'ok' : 'info');
       this.emitWatch();
       this.renderStatus();
       this.notifyViews();

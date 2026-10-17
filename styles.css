@@ -2106,6 +2106,124 @@
 
 /* finesse · register=product · workbench+ai-console · lilac-ramp × #474980 · SOUL=6 SPECTACLE=2 DENSITY=7 */
 
+/* ===================== v1.0.0 进度条 + 新手引导空态 ===================== */
+
+/* —— 进度条（状态条第二行，3px 细轨） —— */
+.wmc-watch-main {
+  flex: 1 1 220px;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.wmc-progress {
+  height: 3px;
+  border-radius: 2px;
+  background: var(--wmc-bg-2, var(--background-secondary));
+  overflow: hidden;
+}
+
+.wmc-progress-fill {
+  height: 100%;
+  width: 0;
+  border-radius: 2px;
+  transition: width 0.5s cubic-bezier(0.32, 0.72, 0, 1);
+}
+
+.wmc-progress-fill.is-busy {
+  background: var(--wmc-brand, #474980);
+}
+
+.wmc-progress-fill.is-idle {
+  background: #34c98e;
+}
+
+.wmc-progress-fill.is-error {
+  background: #f87171;
+}
+
+.wmc-watch-dot.is-error {
+  background: #f87171;
+  box-shadow: 0 0 0 3px rgba(248, 113, 113, 0.18);
+}
+
+/* —— 新手引导空态（hero） —— */
+.wmc-root .wmc-hero {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 72px 24px;
+  text-align: center;
+}
+
+.wmc-hero-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 64px;
+  height: 64px;
+  margin-bottom: 18px;
+  border-radius: 18px;
+  background: color-mix(in srgb, var(--wmc-brand, #474980) 10%, transparent);
+  color: var(--wmc-brand, #474980);
+}
+
+.wmc-hero-icon .svg-icon {
+  width: 30px;
+  height: 30px;
+}
+
+.wmc-hero-title {
+  margin-bottom: 8px;
+  font-size: 17px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  color: var(--wmc-ink-1, var(--text-normal));
+}
+
+.wmc-hero-sub {
+  max-width: 380px;
+  margin-bottom: 24px;
+  font-size: 13px;
+  line-height: 1.65;
+  color: var(--wmc-ink-3, var(--text-faint));
+}
+
+.wmc-hero-btns {
+  display: flex;
+  gap: 10px;
+}
+
+.wmc-hero-btn {
+  height: 36px;
+  padding: 0 18px;
+  border: 1px solid var(--wmc-line, var(--background-modifier-border));
+  border-radius: 9px;
+  background: var(--wmc-bg-1, var(--background-primary));
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--wmc-ink-1, var(--text-normal));
+  cursor: pointer;
+  box-shadow: none;
+  transition: background 0.12s ease, border-color 0.12s ease;
+}
+
+.wmc-hero-btn:hover {
+  background: var(--wmc-hover, var(--background-modifier-hover));
+}
+
+.wmc-hero-btn.is-primary {
+  background: var(--wmc-brand, #474980);
+  border-color: var(--wmc-brand, #474980);
+  color: #fff;
+}
+
+.wmc-hero-btn.is-primary:hover {
+  background: color-mix(in srgb, var(--wmc-brand, #474980) 88%, #fff);
+}
+
 /* ------------------------- v0.8.0 盯采面板（左侧抽屉） ------------------------- */
 
 .wmc-root {

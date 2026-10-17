@@ -350,7 +350,9 @@ export class WmcView extends ItemView {
     if (!s.running && !s.busy && !s.lastRunAt && !s.log.length) return; // 完全没用过就不显示
     const bar = parent.createDiv('wmc-watchbar');
     bar.createDiv('wmc-watch-dot');
-    bar.createDiv('wmc-watch-text');
+    const main = bar.createDiv('wmc-watch-main');
+    main.createDiv('wmc-watch-text');
+    main.createDiv('wmc-progress').createDiv('wmc-progress-fill');
     const actions = bar.createDiv('wmc-watch-actions');
     this.iconBtn(actions, 'zap', '立即抓取一轮', () => void this.plugin.runOnce(true));
     const stopBtn = this.iconBtn(
@@ -396,27 +398,46 @@ export class WmcView extends ItemView {
     const s = this.plugin.getWatchStatus();
     const dot = bar.querySelector('.wmc-watch-dot');
     const text = bar.querySelector('.wmc-watch-text') as HTMLElement | null;
-    if (!dot || !text) return;
-    dot.className = `wmc-watch-dot ${s.busy ? 'is-busy' : s.running ? 'is-idle' : 'is-off'}`;
-    const p = (n: number) => String(n).padStart(2, '0');
-    let t: string;
+    const fill = bar.querySelector('.wmc-progress-fill') as HTMLElement | null;
+    if (!dot || !text || !fill) return;
+
+    let mode: 'busy' | 'idle' | 'error' | 'off' = 'off';
+    let t = '';
+    let pct = 0;
+
     if (s.busy) {
-      t =
-        s.phase === 'list'
-          ? `扫描 ${s.account || '…'}（${s.accountIndex}/${s.accountTotal}）· 新 ${s.found}`
-          : `归档 ${s.account || '…'} · 已落盘 ${s.written}`;
+      mode = 'busy';
+      if (s.phase === 'list') {
+        pct = s.accountTotal ? s.accountIndex / s.accountTotal : 0;
+        t = `正在看「${s.account || '…'}」（第 ${s.accountIndex}/${s.accountTotal} 个号）`;
+      } else {
+        pct = s.queueTotal ? (s.written + s.skipped) / s.queueTotal : 0;
+        t = `正在存「${s.account || '…'}」的文章（${s.written + s.skipped}/${s.queueTotal} 篇）`;
+      }
+    } else if (s.lastError) {
+      mode = 'error';
+      pct = 1;
+      t = /2012|风控|登录/.test(s.lastError) ? '登录过期了 — 去设置里重新扫码就能继续' : `出错了：${s.lastError}`;
     } else if (s.running) {
+      mode = 'idle';
+      const intervalMs = Math.max(15, this.plugin.settings.intervalMin || 30) * 60000;
       const remain = s.nextRunAt ? Math.max(0, s.nextRunAt - Date.now()) : 0;
+      pct = intervalMs ? Math.min(1, Math.max(0, 1 - remain / intervalMs)) : 0;
       const m = Math.floor(remain / 60000);
       const sec = Math.floor((remain % 60000) / 1000);
-      t = `盯采中 · 下轮 ${m}:${String(sec).padStart(2, '0')}${s.lastRunAt ? ` · 上次 +${s.written}` : ''}`;
+      t = `自动更新中 · ${m} 分 ${sec} 秒后看下一轮${s.lastRunAt ? ` · 上次收了 ${s.written} 篇` : ''}`;
     } else if (s.lastRunAt) {
       const d = new Date(s.lastRunAt);
-      t = `已暂停 · 上次 ${p(d.getHours())}:${p(d.getMinutes())} +${s.written}`;
+      const p = (n: number) => String(n).padStart(2, '0');
+      t = `自动更新已暂停 · 上次 ${p(d.getHours())}:${p(d.getMinutes())} 收了 ${s.written} 篇`;
+      pct = 1;
     } else {
-      t = '盯采未开启';
+      t = '自动更新还没开启 — 点右边 ▶ 开始';
     }
-    if (s.lastError) t += ` · ${s.lastError}`;
+
+    dot.className = `wmc-watch-dot is-${mode === 'busy' ? 'busy' : mode === 'idle' ? 'idle' : mode === 'error' ? 'error' : 'off'}`;
+    fill.className = `wmc-progress-fill is-${mode}`;
+    fill.style.width = `${Math.round(pct * 100)}%`;
     text.setText(t);
   }
 
@@ -545,14 +566,7 @@ export class WmcView extends ItemView {
     if (this.panelOpen) this.renderPanel(root);
 
     if (!rows.length) {
-      const e = root.createDiv('wmc-empty');
-      e.setText(
-        this.plugin.settings.cookie
-          ? this.query || this.account || this.archFilter !== 'all' || this.readFilter !== 'all'
-            ? '没有符合筛选条件的文章。'
-            : '还没有文章。点右上角刷新抓一轮，或去设置勾选公众号。'
-          : '还没登录：设置 → 扫码登录。',
-      );
+      this.renderEmpty(root);
       return;
     }
 
@@ -594,6 +608,59 @@ export class WmcView extends ItemView {
         inp.setSelectionRange(len, len);
       }
     }
+  }
+
+  /* ------------------------- 空态 = 新手引导 ------------------------- */
+
+  private renderEmpty(root: HTMLElement): void {
+    const loggedIn = !!this.plugin.settings.cookie;
+    const hasAccounts = this.plugin.settings.accounts.length > 0;
+    const filtering = !!(this.query || this.account || this.archFilter !== 'all' || this.readFilter !== 'all');
+
+    const wrap = root.createDiv('wmc-hero');
+    const ico = wrap.createDiv('wmc-hero-icon');
+    setIcon(ico, filtering ? 'search-x' : loggedIn ? 'newspaper' : 'key-round');
+
+    if (!loggedIn) {
+      wrap.createDiv({ cls: 'wmc-hero-title', text: '把公众号新文章自动存进 Obsidian' });
+      wrap.createDiv({ cls: 'wmc-hero-sub', text: '扫码登录微信读书就能开始，不用复制任何东西' });
+      this.heroBtn(wrap, '① 扫码登录', true, () => this.plugin.startQrLogin());
+      return;
+    }
+    if (!hasAccounts) {
+      wrap.createDiv({ cls: 'wmc-hero-title', text: '先告诉我要盯哪些公众号' });
+      wrap.createDiv({ cls: 'wmc-hero-sub', text: '从你微信读书的书架里勾选想追的号，我会自动收集它们的新文章' });
+      this.heroBtn(wrap, '去选择公众号', true, () => {
+        this.panelOpen = true;
+        this.render();
+      });
+      return;
+    }
+    if (filtering) {
+      wrap.createDiv({ cls: 'wmc-hero-title', text: '这样筛选没有文章' });
+      wrap.createDiv({ cls: 'wmc-hero-sub', text: '换个关键词，或者清除筛选条件看看全部' });
+      this.heroBtn(wrap, '清除筛选，看全部', false, () => {
+        this.query = '';
+        this.account = '';
+        this.archFilter = 'all';
+        this.readFilter = 'all';
+        this.render();
+      });
+      return;
+    }
+    wrap.createDiv({ cls: 'wmc-hero-title', text: '还没有收集到文章' });
+    wrap.createDiv({ cls: 'wmc-hero-sub', text: '点下面的按钮，马上抓第一轮（只抓你勾选的公众号）' });
+    const row = wrap.createDiv('wmc-hero-btns');
+    this.heroBtn(row, '立即抓取第一轮', true, () => void this.plugin.runOnce(true).then(() => this.render()));
+    this.heroBtn(row, '调整要盯的号', false, () => {
+      this.panelOpen = true;
+      this.render();
+    });
+  }
+
+  private heroBtn(parent: HTMLElement, text: string, primary: boolean, onClick: () => void): void {
+    const b = parent.createEl('button', { cls: `wmc-hero-btn${primary ? ' is-primary' : ''}`, text });
+    b.addEventListener('click', onClick);
   }
 
   private item(r: RowItem): HTMLElement {
