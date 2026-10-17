@@ -622,8 +622,8 @@ export class WmcView extends ItemView {
   private iconBtn(parent: HTMLElement, icon: string, label: string, onClick: () => void, cta = false): HTMLElement {
     const b = parent.createEl('button', { cls: `wmc-icon-btn${cta ? ' is-cta' : ''}` });
     setIcon(b, icon);
-    b.setAttr('aria-label', label);
-    b.setAttr('title', label);
+    // 可读名用 visually-hidden 文本，不用 aria-label / title —— Obsidian 会把它们映射成 hover 气泡
+    b.createSpan({ cls: 'wmc-sr', text: label });
     b.addEventListener('click', onClick);
     return b;
   }

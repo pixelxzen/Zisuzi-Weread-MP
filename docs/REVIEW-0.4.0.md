@@ -49,9 +49,15 @@
 - **根因**：本机 node 在 `~/.local/bin`，不在 `/opt/homebrew/bin`。
 - **解法**：plist 的 `EnvironmentVariables.PATH` 显式列出 node 的真实目录。
 
-### 8. Electron `remote` 存在，但读到的 session 未必有登录态
-- 能用来截图（`remote.getCurrentWindow()`），也能读 cookie，但读到的是 Obsidian 自己的 session。
-- 扫码登录的正确做法：`window.open('https://weread.qq.com/')` + 轮询 session cookie 直到出现完整 6 项。
+### 8. `electron.remote` 在 Obsidian 1.14 已被移除；且 `requestUrl` 不带 session cookie
+
+早期结论（「remote 存在但 session 为空」）已被两次实测推翻，保留结论而非过程：
+
+- Obsidian 1.14 起 `require('electron').remote` **恒为 undefined**，任何 `remote.session.cookies.get()` 永久失效且不报错。
+- 更隐蔽的一条：Obsidian 的 `requestUrl` 走 `ipcMain.on('request-url')` → `net.request({...})`，**没有传 `useSessionCookies`**，而 Electron 该选项默认 false —— **请求一条 session cookie 都不带**。所以「靠 session 自动带 cookie 的探测」在这个宿主里恒失败。
+- 正解：登录容器用 `<webview>`（不是 iframe，iframe 跨域读不到 `document.cookie`），登录后 `wv.executeJavaScript('document.cookie')` 取出非 HttpOnly cookie 写进设置，之后请求显式带 `Cookie` 头。
+
+完整取用阶梯与判据见 `obsidian-plugin-hands-on` skill 的「内嵌第三方登录」一节。
 
 ### 9. 切库必须重启 Obsidian
 - 改 `obsidian.json` 的 `open` 标记后，运行中的 Obsidian 不会重新读 → 必须 quit + open。每次验收代价 2 次重启（切去 QA、切回主库）。

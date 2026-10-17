@@ -3,3 +3,11 @@ dist/
 qa-vault/
 .DS_Store
 *.log
+
+# 本地开发辅助（含本机路径，不公开）
+scripts/*.cjs
+.agents/
+.claude/
+skills-lock.json
+*.bak-*
+*.bak

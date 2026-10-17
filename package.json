@@ -1,9 +1,18 @@
 {
   "name": "zisuzi-weread-mp",
-  "version": "3.9.2",
+  "version": "4.0.0",
   "description": "微信读书公众号盯采：登录后自动抓取书架公众号更新，归档为 Obsidian 笔记。",
   "main": "main.js",
   "type": "module",
+  "author": "紫苏子ACG",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/pixelxzen/zisuzi-Weread-MP.git"
+  },
+  "homepage": "https://github.com/pixelxzen/zisuzi-Weread-MP#readme",
+  "bugs": {
+    "url": "https://github.com/pixelxzen/zisuzi-Weread-MP/issues"
+  },
   "scripts": {
     "dev": "node esbuild.config.mjs",
     "build": "tsc -noEmit -skipLibCheck && node esbuild.config.mjs production",
@@ -13,7 +22,7 @@
     "obsidian",
     "weread",
     "wechat",
-    "rss",
+    "markdown",
     "archive"
   ],
   "license": "GPL-3.0-only",
