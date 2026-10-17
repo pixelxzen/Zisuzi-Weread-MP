@@ -274,88 +274,25 @@ export default class WereadMpCatcher extends Plugin {
   }
 
   /**
-   * HTTP 层：优先走 Electron net.request + 独立 partition（不带 defaultSession 的 cookie）。
-   * 原因：Obsidian requestUrl 会把 defaultSession 里残留的 weread 旧 cookie 和手动 Cookie
-   * 头一起发出，服务端读到旧的就报 -2012。独立 partition 保证只发我们给的那份。
-   */
-  private httpRaw: HttpFn = async (url: string, headers: Record<string, string>) => {
-    try {
-      // eslint-disable-next-line @typescript-eslint/no-var-requires
-      const electron: any = (window as any).require?.('electron');
-      const net = electron?.remote?.net;
-      const session = electron?.remote?.session;
-      if (net && session) {
-        return await new Promise((resolve, reject) => {
-          const req = net.request({
-            url,
-            method: 'GET',
-            session: session.fromPartition('wmc-isolated'),
-            useSessionCookies: false,
-          });
-          for (const [k, v] of Object.entries(headers)) {
-            try {
-              req.setHeader(k, v);
-            } catch {
-              /* 非法头名跳过 */
-            }
-          }
-          const chunks: Uint8Array[] = [];
-          req.on('response', (res: any) => {
-            res.on('data', (c: Uint8Array) => chunks.push(c));
-            res.on('end', () => {
-              let total = 0;
-              for (const c of chunks) total += c.byteLength;
-              const out = new Uint8Array(total);
-              let off = 0;
-              for (const c of chunks) {
-                out.set(c, off);
-                off += c.byteLength;
-              }
-              const bytes = out.buffer.slice(out.byteOffset, out.byteOffset + out.byteLength) as ArrayBuffer;
-              resolve({
-                status: res.statusCode ?? 0,
-                text: new TextDecoder('utf-8').decode(bytes),
-                bytes,
-              });
-            });
-            res.on('error', reject);
-          });
-          req.on('error', reject);
-          req.end();
-        });
-      }
-    } catch {
-      /* 落到 requestUrl */
-    }
-    const r = await requestUrl({ url, method: 'GET', headers, throw: false });
-    return { status: r.status, text: r.text, bytes: r.arrayBuffer };
-  };
-
-  /**
-   * 带超时的 HTTP：Electron net 在没有响应时会一直挂着（实测 2026-10-17：
-   * 列表请求挂死 → `running` 永久为 true → 之后每一轮都被"上一轮还在跑"挡掉，
-   * 盯采看起来在跑其实一条都没抓）。这里统一 20s 超时，超时返回 status 0，
-   * 上层当成普通失败跳过，不再堵死队列。
+   * HTTP 层：Obsidian requestUrl + 8s 超时兜底。
+   * 教训：v0.9.2 曾改用 Electron net.request + 独立 partition，结果 response 事件不触发，
+   * 请求永久 pending → 界面"假死"。net.request 在 renderer 里不可靠，已回退。
    */
   private http: HttpFn = async (url: string, headers: Record<string, string>) => {
-    const TIMEOUT_MS = 20000;
     let timer: number | undefined;
     try {
-      return await Promise.race([
-        this.httpRaw(url, headers),
-        new Promise<{ status: number; text: string; bytes: ArrayBuffer }>((resolve) => {
-          timer = window.setTimeout(
-            () => resolve({ status: 0, text: '', bytes: new ArrayBuffer(0) }),
-            TIMEOUT_MS,
-          );
+      const r = await Promise.race([
+        requestUrl({ url, method: 'GET', headers, throw: false }),
+        new Promise<never>((_, rej) => {
+          timer = window.setTimeout(() => rej(new Error(`请求超时 8 秒：${url.slice(0, 70)}`)), 8000);
         }),
       ]);
-    } catch {
-      return { status: 0, text: '', bytes: new ArrayBuffer(0) };
+      return { status: r.status, text: r.text, bytes: r.arrayBuffer };
     } finally {
       if (timer !== undefined) window.clearTimeout(timer);
     }
   };
+
 
   async onload() {
     await this.loadAll();
@@ -803,7 +740,12 @@ export default class WereadMpCatcher extends Plugin {
       if (reset && added) new Notice(`「${name}」首批 ${items.length} 篇已就绪，往下滚继续加载`, 5000);
       return items.length;
     } catch (e) {
-      new Notice(`加载「${name}」失败：${e instanceof Error ? e.message : String(e)}`, 6000);
+      const msg = e instanceof Error ? e.message : String(e);
+      if (e instanceof RiskError) {
+        new Notice(`登录过期了（-2012）：去设置 → 切换账号重新扫码，就能继续加载`, 10000);
+      } else {
+        new Notice(`加载「${name}」失败：${msg}`, 7000);
+      }
       return 0;
     }
   }
