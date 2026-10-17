@@ -1,4 +1,4 @@
-# zisuzi-Weread-MP
+# Zisuzi-Weread-MP
 
 **微信读书公众号盯采 · 在 Obsidian 里自动归档你书架里订阅的公众号文章（含图片、音视频）。**
 
@@ -28,17 +28,17 @@
 
 ### 社区插件市场（推荐）
 
-`设置 → 第三方插件 → 浏览 → 搜索「zisuzi-Weread-MP」` → 安装 → 启用。
+`设置 → 第三方插件 → 浏览 → 搜索「Zisuzi-Weread-MP」` → 安装 → 启用。
 
 ### 手动安装
 
-1. 从 [Releases](https://github.com/pixelxzen/zisuzi-Weread-MP/releases) 下载 `main.js`、`manifest.json`、`styles.css`
+1. 从 [Releases](https://github.com/pixelxzen/Zisuzi-Weread-MP/releases) 下载 `main.js`、`manifest.json`、`styles.css`
 2. 放到 `<你的库>/.obsidian/plugins/zisuzi-weread-mp/`
-3. `设置 → 第三方插件 → 重新加载 → 启用「zisuzi-Weread-MP」`
+3. `设置 → 第三方插件 → 重新加载 → 启用「Zisuzi-Weread-MP」`
 
 ## 快速开始
 
-1. 打开 `设置 → zisuzi-Weread-MP`
+1. 打开 `设置 → Zisuzi-Weread-MP`
 2. 点 **扫码登录**，在弹出的窗口里用微信扫一下
    - 登录成功后窗口自动关闭，头像、昵称、书架全部自动就位
 3. 回到插件主界面，左侧勾选你要盯的公众号
