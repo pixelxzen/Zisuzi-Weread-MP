@@ -64,6 +64,7 @@ export interface WMSettings {
   maxMediaMB: number;
   panelOpen: boolean;
   agent: AgentSettings;
+  agentDocked: boolean;
   outputDir: string;
   listWidth: number;
   llm: LLMSettings;
@@ -116,6 +117,7 @@ const DEFAULTS: WMSettings = {
   maxMediaMB: 50,
   panelOpen: false,
   agent: { preset: 'hermes', cmd: '', args: [], cwd: '' },
+  agentDocked: true,
   outputDir: '微信读书公众号',
   listWidth: 300,
   llm: { ...LLM_DEFAULTS },
@@ -1631,6 +1633,16 @@ class WMSettingTab extends PluginSettingTab {
           }),
         );
     }
+
+    new Setting(containerEl)
+      .setName('文章内嵌入 Agent 侧栏')
+      .setDesc('打开文章时右侧并排显示 Agent（边读边处理）。关掉则只在详情页 Tab 里出现')
+      .addToggle((t) =>
+        t.setValue(this.plugin.settings.agentDocked).onChange(async (v) => {
+          this.plugin.settings.agentDocked = v;
+          await this.plugin.saveAll();
+        }),
+      );
 
     new Setting(containerEl)
       .setName('工作目录')

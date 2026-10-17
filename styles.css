@@ -1664,6 +1664,208 @@
   margin-bottom: 10px;
 }
 
+
+/* ===================== v2.2.0 左栏布局 + Agent 嵌入侧栏 ===================== */
+
+.wmc-body {
+  display: flex;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.wmc-side {
+  flex: 0 0 208px;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  border-right: 1px solid var(--wmc-line);
+  background: var(--wmc-raised);
+}
+
+.wmc-side-head {
+  display: flex;
+  align-items: center;
+  height: 32px;
+  padding: 0 4px 0 12px;
+  border-bottom: 1px solid var(--wmc-line);
+  flex: 0 0 auto;
+}
+
+.wmc-side-title {
+  flex: 1 1 auto;
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: var(--wmc-ink-4);
+}
+
+.wmc-side-head .wmc-icon-btn {
+  width: 22px;
+  height: 22px;
+}
+
+.wmc-side-search {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--wmc-line);
+  flex: 0 0 auto;
+}
+
+.wmc-side-search-ico {
+  display: inline-flex;
+  color: var(--wmc-ink-4);
+}
+
+.wmc-side-search-ico .svg-icon {
+  width: 12px;
+  height: 12px;
+}
+
+.wmc-side-search input {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 22px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+  font-size: 12px;
+  color: var(--wmc-ink-1);
+}
+
+.wmc-side-search input:focus {
+  outline: none;
+  box-shadow: none;
+}
+
+.wmc-side-list {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 4px 0 12px;
+}
+
+.wmc-side-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 28px;
+  margin: 0 4px;
+  padding: 0 8px;
+  border-radius: var(--wmc-r-xs);
+  cursor: pointer;
+  transition: background var(--wmc-120) var(--wmc-ease), color var(--wmc-120) var(--wmc-ease);
+}
+
+.wmc-side-row:hover {
+  background: var(--wmc-hover);
+}
+
+.wmc-side-row.is-active {
+  background: var(--wmc-brand-soft);
+}
+
+.wmc-side-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  font-size: 12px;
+  color: var(--wmc-ink-2);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.wmc-side-row.is-active .wmc-side-name {
+  font-weight: 500;
+  color: var(--wmc-brand-fg);
+}
+
+.wmc-side-count {
+  flex: 0 0 auto;
+  font-size: 10px;
+  color: var(--wmc-ink-4);
+}
+
+.wmc-side-empty {
+  padding: 14px 10px;
+  font-size: 11px;
+  color: var(--wmc-ink-4);
+  text-align: center;
+}
+
+.wmc-main {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+/* 详情：正文列 + Agent 侧栏 */
+.wmc-detail-wrap {
+  display: flex;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.wmc-detail-main {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.wmc-detail-aside {
+  flex: 0 0 296px;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 12px;
+  border-left: 1px solid var(--wmc-line);
+  background: var(--wmc-raised);
+}
+
+.wmc-detail-aside .wmc-ai-out {
+  min-height: 120px;
+  max-height: none;
+  flex: 1 1 auto;
+  font-size: 11.5px;
+}
+
+.wmc-detail-aside .wmc-ai-chips {
+  gap: 5px;
+}
+
+.wmc-detail-aside .wmc-agent-chip {
+  height: 24px;
+  padding: 0 9px;
+  font-size: 11.5px;
+}
+
+.wmc-detail-aside .wmc-ai-input {
+  flex-direction: column;
+  align-items: stretch;
+}
+
+.wmc-detail-aside .wmc-ai-input .wmc-hero-btn {
+  height: 28px;
+}
+
+.wmc-detail-aside .wmc-agent-textarea {
+  min-height: 50px;
+}
+
+@media (max-width: 900px) {
+  .wmc-detail-aside {
+    display: none;
+  }
+}
+
 /* ---------------------------------- menu --------------------------------- */
 
 .wmc-menu {

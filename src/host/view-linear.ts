@@ -79,6 +79,7 @@ export class WmcView extends ItemView {
   private loadingMore = false;
   private accountExhausted = false;
   private scrollMemory = 0;
+  private sideQuery = '';
 
   private get panelOpen(): boolean {
     return !!this.plugin.settings.panelOpen;
@@ -591,18 +592,23 @@ export class WmcView extends ItemView {
     const root = this.contentEl;
     root.empty(); // 搜索 input/筛选 onChange 直接调本函数，必须先清，否则每击一键叠加一份
     this.header(root);
-    this.toolbar(root);
+
+    const bodyWrap = root.createDiv('wmc-body');
+    this.renderSidebar(bodyWrap);
+    const main = bodyWrap.createDiv('wmc-main');
+
+    this.toolbar(main);
     const rows = this.rows();
-    this.statbar(root, rows);
-    this.watchbar(root);
-    if (this.panelOpen) this.renderPanel(root);
+    this.statbar(main, rows);
+    this.watchbar(main);
+    if (this.panelOpen) this.renderPanel(main);
 
     if (!rows.length) {
-      this.renderEmpty(root);
+      this.renderEmpty(main);
       return;
     }
 
-    const scroller = root.createDiv('wmc-scroll');
+    const scroller = main.createDiv('wmc-scroll');
     scroller.scrollTop = this.scrollMemory;
     scroller.addEventListener('scroll', () => {
       this.scrollMemory = scroller.scrollTop;
@@ -795,6 +801,74 @@ export class WmcView extends ItemView {
     }
   }
 
+  /* --------------------------- 左栏：公众号切换 --------------------------- */
+
+  private renderSidebar(parent: HTMLElement): void {
+    const side = parent.createDiv('wmc-side');
+    const top = side.createDiv('wmc-side-head');
+    top.createSpan({ cls: 'wmc-side-title', text: '公众号' });
+    const add = top.createEl('button', { cls: 'wmc-icon-btn' });
+    setIcon(add, 'settings-2');
+    add.setAttr('title', '管理要盯的公众号');
+    add.addEventListener('click', () => {
+      this.panelOpen = !this.panelOpen;
+      this.render();
+    });
+
+    const searchWrap = side.createDiv('wmc-side-search');
+    const ico = searchWrap.createSpan('wmc-side-search-ico');
+    setIcon(ico, 'search');
+    const inp = searchWrap.createEl('input', { type: 'search', placeholder: '搜索公众号…' });
+    inp.value = this.sideQuery;
+    inp.addEventListener('input', () => {
+      this.sideQuery = inp.value.trim();
+      this.renderSideList();
+    });
+
+    const list = side.createDiv('wmc-side-list');
+    this.renderSideList(list);
+  }
+
+  private renderSideList(list?: HTMLElement | null): void {
+    const el = list || (this.contentEl.querySelector('.wmc-side-list') as HTMLElement | null);
+    if (!el) return;
+    el.empty();
+
+    const all = this.allRows();
+    const counts = new Map<string, number>();
+    for (const r of all) counts.set(r.account, (counts.get(r.account) || 0) + 1);
+
+    const mk = (name: string, label: string, count: number, active: boolean) => {
+      const row = el.createDiv(`wmc-side-row${active ? ' is-active' : ''}`);
+      row.createSpan({ cls: 'wmc-side-name', text: label });
+      row.createSpan({ cls: 'wmc-side-count', text: String(count) });
+      row.setAttr('title', label);
+      row.addEventListener('click', () => {
+        this.account = name;
+        this.scrollMemory = 0;
+        this.accountExhausted = false;
+        this.renderList();
+        if (name && !this.allRows().some((r) => r.account === name)) {
+          void this.plugin.fetchAccountList(name);
+        }
+      });
+    };
+
+    mk('', '全部文章', all.length, !this.account);
+
+    const names = new Set<string>();
+    for (const a of this.plugin.settings.accounts) names.add(a.name);
+    for (const n of counts.keys()) names.add(n);
+    const q = this.sideQuery.toLowerCase();
+    const sorted = [...names]
+      .filter((n) => !q || n.toLowerCase().includes(q))
+      .sort((a, b) => (counts.get(b) || 0) - (counts.get(a) || 0));
+    for (const n of sorted) mk(n, n, counts.get(n) || 0, this.account === n);
+    if (!sorted.length) {
+      el.createDiv({ cls: 'wmc-side-empty', text: '没有匹配的公众号' });
+    }
+  }
+
   private item(r: RowItem): HTMLElement {
     const el =
       this.layout === 'feed'
@@ -971,7 +1045,10 @@ export class WmcView extends ItemView {
       root.createDiv('wmc-empty').setText('没有选中的文章');
       return;
     }
-    const head = root.createDiv('wmc-detail-head');
+    const wrap = root.createDiv('wmc-detail-wrap');
+    const col = wrap.createDiv('wmc-detail-main');
+    const aside = this.plugin.settings.agentDocked ? wrap.createDiv('wmc-detail-aside') : null;
+    const head = col.createDiv('wmc-detail-head');
     head.createDiv({ cls: 'wmc-detail-title', text: r.title });
     head.createDiv({
       cls: 'wmc-detail-meta',
@@ -980,7 +1057,7 @@ export class WmcView extends ItemView {
       } · ${fmtDay(r.time)}${r.archived ? ' · 已归档' : ''}`,
     });
 
-    const tabs = root.createDiv('wmc-tabs');
+    const tabs = col.createDiv('wmc-tabs');
     const mkTab = (id: Tab, label: string) => {
       const t = tabs.createEl('button', { cls: 'wmc-tab', text: label });
       if (this.tab === id) t.addClass('is-active');
@@ -991,10 +1068,10 @@ export class WmcView extends ItemView {
     };
     mkTab('body', '正文');
     mkTab('ai', 'AI 摘要');
-    mkTab('agent', 'AI 处理');
     mkTab('origin', '原文');
 
-    const body = root.createDiv('wmc-detail-body');
+    const body = col.createDiv('wmc-detail-body');
+    if (aside) void this.renderArticleAgent(r, aside);
 
     if (this.tab === 'agent') {
       await this.renderArticleAgent(r, body);
@@ -1080,8 +1157,8 @@ export class WmcView extends ItemView {
     const head = body.createDiv('wmc-ai-head');
     head.setText(
       plain
-        ? `将把这篇的正文（${plain.length} 字）交给 Agent 处理。选一个动作，或自己写要求。`
-        : '这篇还没归档，Agent 只能拿到标题。先归档可获得全文处理能力。',
+        ? `正文 ${plain.length} 字已就绪，选一个动作：`
+        : '这篇还没归档，Agent 只有标题。先归档可用全文。',
     );
 
     const chips = body.createDiv('wmc-ai-chips');
