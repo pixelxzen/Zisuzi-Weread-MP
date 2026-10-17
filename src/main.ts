@@ -1034,9 +1034,22 @@ export default class WereadMpCatcher extends Plugin {
       text: '在下面窗口里用微信扫码。检测到登录态后会自动关闭并同步书架，不需要复制任何东西。',
     });
     const status = box.createDiv({ cls: 'wmc-login-status', text: '等待扫码…' });
-    const frame = box.createEl('iframe', { cls: 'wmc-login-frame' });
-    frame.setAttr('src', 'https://weread.qq.com/');
-    frame.setAttr('allow', 'clipboard-read; clipboard-write');
+    // 必须用 webview 而不是 iframe：iframe 跨域读不到 document.cookie，
+    // webview 是独立 webContents，executeJavaScript 能在目标页上下文里取 cookie。
+    let wv: any = null;
+    try {
+      wv = document.createElement('webview');
+      wv.className = 'wmc-login-frame';
+      wv.setAttribute('src', 'https://weread.qq.com/');
+      wv.setAttribute('allowpopups', 'false');
+      box.appendChild(wv);
+    } catch {
+      wv = null;
+    }
+    if (!wv) {
+      const frame = box.createEl('iframe', { cls: 'wmc-login-frame' });
+      frame.setAttr('src', 'https://weread.qq.com/');
+    }
     this.loginPolling = true;
     modal.open();
 
@@ -1054,15 +1067,31 @@ export default class WereadMpCatcher extends Plugin {
     let finished = false;
     const finish = async (): Promise<boolean> => {
       if (finished) return true;
-      // ① 老环境能直接读 cookie
-      const ck = await this.tryReadSessionCookie();
       let ok = false;
-      if (ck && checkCookie(ck).ok) {
-        this.settings.cookie = normalizeCookie(ck);
-        this.settings.useSession = false;
-        ok = true;
+      // ① webview 内直接读 document.cookie —— 最可靠，能拿到 wr_skey/wr_vid/wr_gid
+      if (wv && typeof wv.executeJavaScript === 'function') {
+        try {
+          const raw = await wv.executeJavaScript('document.cookie');
+          const str = String(raw || '');
+          if (/wr_skey=/.test(str) && /wr_vid=/.test(str)) {
+            this.settings.cookie = normalizeCookie(str);
+            this.settings.useSession = false;
+            ok = true;
+          }
+        } catch {
+          /* 页面还没加载完，下次再试 */
+        }
       }
-      // ② 读不到就走 session 探测（iframe 登录走这条）
+      // ② 老环境能直接读 cookie
+      if (!ok) {
+        const ck = await this.tryReadSessionCookie();
+        if (ck && checkCookie(ck).ok) {
+          this.settings.cookie = normalizeCookie(ck);
+          this.settings.useSession = false;
+          ok = true;
+        }
+      }
+      // ③ 最后兜底：session 探测
       if (!ok && (await this.probeSessionLogin())) {
         this.settings.useSession = true;
         ok = true;
@@ -1095,9 +1124,17 @@ export default class WereadMpCatcher extends Plugin {
     probeNow = finish;
 
     // 微信读书登录成功后会跳转页面 → iframe 触发 load，立刻探测一次
-    frame.addEventListener('load', () => {
-      void finish();
-    });
+    if (wv && typeof wv.addEventListener === 'function') {
+      wv.addEventListener('dom-ready', () => {
+        void finish();
+      });
+      wv.addEventListener('did-navigate', () => {
+        void finish();
+      });
+      wv.addEventListener('did-navigate-in-page', () => {
+        void finish();
+      });
+    }
 
     void (async () => {
       const t0 = Date.now();
