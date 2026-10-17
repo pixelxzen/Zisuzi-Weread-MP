@@ -10,6 +10,8 @@ export interface ArticleItem {
   readNum?: number;
   likeNum?: number;
   picUrl?: string;
+  /** 列表接口自带的摘要（图片笔记唯一可用的正文线索） */
+  digest?: string;
   mpName: string;
 }
 
@@ -229,6 +231,7 @@ export function parseArticleList(json: any): ArticleItem[] {
         readNum: typeof info.readNum === 'number' ? info.readNum : undefined,
         likeNum: typeof info.likeNum === 'number' ? info.likeNum : undefined,
         picUrl: info.pic_url || info.picUrl || undefined,
+        digest: (info.content || '').trim() || undefined,
         mpName: info.mp_name || '',
       });
     }

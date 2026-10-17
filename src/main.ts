@@ -1117,11 +1117,25 @@ export default class WereadMpCatcher extends Plugin {
     }
   }
 
-  private async fetchOne(client: WereadClient, acc: AccountRef, item: ArticleItem): Promise<boolean> {
+  private async fetchOne(client: WereadClient, acc: AccountRef, item: ArticleItem): Promise<'written' | 'exists' | 'empty'> {
     const html = await client.getContentHtml(item.reviewId);
-    const { markdown, images, media } = htmlToMarkdown(html);
-    // 纯图片笔记（小绿书）/ 纯视频推送没有正文文本但有占位符 → 也要归档
-    if (!markdown.trim() && !images.length && !media.length) return false;
+    let { markdown } = htmlToMarkdown(html);
+    const { images, media } = htmlToMarkdown(html);
+
+    // 图片笔记（小绿书）：正文由前端 JS 渲染，HTML 里没有 js_content。
+    // 只有封面图 + 摘要可用 —— 用它们生成一篇「图片笔记」而不是判空丢弃。
+    if (!markdown.trim() && !images.length && !media.length) {
+      if (item.picUrl || item.digest) {
+        const bits: string[] = [];
+        bits.push('> 这是一篇**图片笔记**（小绿书）。微信读书只提供封面与摘要，完整内容请点原文链接。');
+        if (item.digest) bits.push('', item.digest);
+        bits.push('', `[在微信读书打开原文](https://weread.qq.com/web/mp/${item.reviewId})`);
+        markdown = bits.join('\n');
+        if (item.picUrl && !images.length) images.push({ src: item.picUrl } as never);
+      } else {
+        return 'empty';
+      }
+    }
 
     const base = safeFileName(item.title || '(无标题)');
     const dir = normalizePath(`${this.settings.outputDir}/${safeFileName(acc.name)}`);
@@ -1185,7 +1199,7 @@ export default class WereadMpCatcher extends Plugin {
     let bodyMd = replaceImagePlaceholders(markdown, localPaths);
     if (media.length) bodyMd = replaceMediaPlaceholders(bodyMd, mediaRefs);
     const path = normalizePath(`${dir}/${base}.md`);
-    if (this.app.vault.getAbstractFileByPath(path)) return false; // 幂等
+    if (this.app.vault.getAbstractFileByPath(path)) return 'exists'; // 幂等：已存在算已完成，不算空
 
     const published = fmtDate(item.time);
     const fmTags = ['剪藏', '微信读书公众号'];
@@ -1226,7 +1240,7 @@ export default class WereadMpCatcher extends Plugin {
       path,
       at: Date.now(),
     };
-    return true;
+    return 'written';
   }
 
   private async ensureFolder(path: string) {
@@ -1293,7 +1307,10 @@ export default class WereadMpCatcher extends Plugin {
     const only = opts.only && opts.only.length ? new Set(opts.only) : null;
     const scope = only ? list.filter((a) => only.has(a.reviewId)) : list;
     const tasks: BfItem[] = scope.map((it) => {
-      const done = !!this.state.processed[it.reviewId] && !only;
+      const rec = this.state.processed[it.reviewId];
+      // 光有 processed 记录不算数：笔记文件必须真的还在（用户可能删过/移动过）
+      const fileOk = !!(rec && rec.path && this.app.vault.getAbstractFileByPath(rec.path));
+      const done = fileOk && !only;
       return {
         reviewId: it.reviewId,
         title: it.title,
@@ -1323,10 +1340,10 @@ export default class WereadMpCatcher extends Plugin {
       row.state = 'running';
       emit(n - 1, tasks.filter((t) => t.state === 'done').length);
       const t0 = Date.now();
-      let ok = false;
+      let res: 'written' | 'exists' | 'empty' | '' = '';
       for (let attempt = 1; attempt <= 2; attempt++) {
         try {
-          ok = await this.fetchOne(client, acc, it);
+          res = await this.fetchOne(client, acc, it);
           break;
         } catch (e) {
           if (e instanceof RiskError) {
@@ -1356,12 +1373,15 @@ export default class WereadMpCatcher extends Plugin {
         }
       }
       row.ms = Date.now() - t0;
-      if (ok) {
+      if (res === 'written') {
         row.state = 'done';
         row.note = undefined;
+      } else if (res === 'exists') {
+        row.state = 'skipped';
+        row.note = '文件已存在';
       } else if (row.state !== 'failed') {
         row.state = 'skipped';
-        row.note = '正文为空';
+        row.note = '无正文（疑似已删除）';
       }
       emit(n, tasks.filter((t) => t.state === 'done').length);
       if (n % T.every === 0) await sleep(T.rest);
@@ -1469,8 +1489,8 @@ export default class WereadMpCatcher extends Plugin {
     const client = new WereadClient(this.http, cookie);
     try {
       const ok = await this.fetchOne(client, acc, item);
-      if (ok) await this.saveAll();
-      return ok;
+      if (ok === 'written') await this.saveAll();
+      return ok === 'written' || ok === 'exists';
     } catch (e) {
       new Notice(`抓取失败：${e instanceof Error ? e.message : String(e)}`);
       return false;

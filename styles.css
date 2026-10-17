@@ -1867,50 +1867,349 @@
 }
 
 
-/* ============ v3.1.0 归档进度逐篇列表 ============ */
+/* ================= v3.2.0 归档弹窗（从零重构） ================= */
 
-.wmc-backfill {
-  max-width: 620px;
+.wmc-bf {
+  padding: 0 !important;
+  width: 620px;
+  max-width: 92vw;
 }
 
-.wmc-bf-sum {
-  margin: 8px 0 6px;
+/* 头部 */
+.wmc-bf-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 18px 18px 14px;
+  border-bottom: 1px solid var(--wmc-line);
+}
+
+.wmc-bf-mark {
+  flex: 0 0 30px;
+  height: 30px;
+  display: grid;
+  place-items: center;
+  border-radius: var(--wmc-r-sm);
+  background: var(--wmc-brand-soft);
+  color: var(--wmc-brand);
+}
+
+.wmc-bf-mark .svg-icon {
+  width: 16px;
+  height: 16px;
+}
+
+.wmc-bf-head-txt {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.wmc-bf-h1 {
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  color: var(--wmc-ink-1);
+}
+
+.wmc-bf-h2 {
+  margin-top: 2px;
+  font-size: 11.5px;
+  color: var(--wmc-ink-4);
+}
+
+.wmc-bf-x {
+  flex: 0 0 auto;
+  width: 24px;
+  height: 24px;
+  display: grid;
+  place-items: center;
+  border: 0;
+  border-radius: var(--wmc-r-xs);
+  background: transparent;
+  color: var(--wmc-ink-4);
+  box-shadow: none;
+  cursor: pointer;
+}
+
+.wmc-bf-x:hover {
+  background: var(--wmc-hover);
+  color: var(--wmc-ink-2);
+}
+
+/* 表单 */
+.wmc-bf-form {
+  display: flex;
+  flex-direction: column;
+  gap: 11px;
+  padding: 14px 18px 12px;
+}
+
+.wmc-bf-field {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.wmc-bf-label {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: var(--wmc-ink-4);
+}
+
+.wmc-bf-input,
+.wmc-bf-select {
+  width: 100%;
+  height: 30px;
+  padding: 0 9px;
+  border: 1px solid var(--wmc-line-2);
+  border-radius: var(--wmc-r-sm);
+  background: var(--wmc-inset);
+  color: var(--wmc-ink-1);
+  font-size: 12.5px;
+  box-shadow: none;
+}
+
+.wmc-bf-input:focus,
+.wmc-bf-select:focus {
+  outline: none;
+  border-color: var(--wmc-brand-line);
+  box-shadow: 0 0 0 3px var(--wmc-brand-soft);
+}
+
+.wmc-bf-two {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+
+.wmc-bf-hint {
+  font-size: 10.5px;
+  color: var(--wmc-ink-4);
+}
+
+/* 速度分段 */
+.wmc-bf-seg {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 4px;
+  padding: 3px;
+  border: 1px solid var(--wmc-line-2);
+  border-radius: var(--wmc-r-sm);
+  background: var(--wmc-inset);
+}
+
+.wmc-bf-seg-btn {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 5px 8px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  text-align: left;
+  box-shadow: none;
+  cursor: pointer;
+  transition: background var(--wmc-120) var(--wmc-ease);
+}
+
+.wmc-bf-seg-btn:hover {
+  background: var(--wmc-hover);
+}
+
+.wmc-bf-seg-btn.is-on {
+  background: var(--wmc-brand-soft);
+}
+
+.wmc-bf-seg-t {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--wmc-ink-2);
+}
+
+.wmc-bf-seg-btn.is-on .wmc-bf-seg-t {
+  color: var(--wmc-brand-fg);
+}
+
+.wmc-bf-seg-s {
+  font-size: 10px;
+  color: var(--wmc-ink-4);
+}
+
+/* 风控提示 */
+.wmc-bf-warn {
+  margin: 0 18px 12px;
+  padding: 7px 10px;
+  border: 1px solid color-mix(in srgb, #f5a623 26%, transparent);
+  border-radius: var(--wmc-r-sm);
+  background: color-mix(in srgb, #f5a623 9%, transparent);
+  font-size: 11px;
+  line-height: 1.55;
+  color: var(--wmc-ink-3);
+}
+
+/* 进度 */
+.wmc-bf-prog {
+  padding: 0 18px 12px;
+}
+
+.wmc-bf-prog-note {
+  margin-bottom: 8px;
   font-size: 11.5px;
   color: var(--wmc-ink-3);
+}
+
+.wmc-bf-prog-note.is-bad {
+  color: #e05252;
+}
+
+.wmc-bf-prog-top {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  margin-bottom: 6px;
+}
+
+.wmc-bf-pct {
+  font-size: 20px;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  color: var(--wmc-ink-1);
   font-variant-numeric: tabular-nums;
 }
 
-.wmc-bf-list {
-  max-height: 320px;
-  overflow-y: auto;
-  border: 1px solid var(--wmc-line);
-  border-radius: var(--wmc-r-sm);
+.wmc-bf-prog-meta {
+  flex: 1 1 auto;
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+}
+
+.wmc-bf-prog-main {
+  font-size: 12px;
+  color: var(--wmc-ink-2);
+  font-variant-numeric: tabular-nums;
+}
+
+.wmc-bf-prog-eta {
+  font-size: 10.5px;
+  color: var(--wmc-ink-4);
+}
+
+.wmc-bf-bar {
+  height: 4px;
+  overflow: hidden;
+  border-radius: 999px;
   background: var(--wmc-inset);
+}
+
+.wmc-bf-bar-fill {
+  height: 100%;
+  border-radius: 999px;
+  background: var(--wmc-brand);
+  transition: width 200ms cubic-bezier(0.32, 0.72, 0, 1);
+}
+
+.wmc-bf-bar-fill.is-bad {
+  background: #f87171;
+}
+
+.wmc-bf-bar-fill.is-indet {
+  width: 32% !important;
+  animation: wmc-indet 1.2s ease-in-out infinite;
+}
+
+@keyframes wmc-indet {
+  0% {
+    transform: translateX(-110%);
+  }
+  100% {
+    transform: translateX(330%);
+  }
+}
+
+.wmc-bf-chips {
+  display: flex;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.wmc-bf-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 20px;
+  padding: 0 7px;
+  border-radius: 999px;
+  font-size: 10.5px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+}
+
+.wmc-bf-chip.is-ok {
+  background: color-mix(in srgb, #34c98e 14%, transparent);
+  color: #2fae7c;
+}
+
+.wmc-bf-chip.is-skip {
+  background: var(--wmc-hover);
+  color: var(--wmc-ink-4);
+}
+
+.wmc-bf-chip.is-bad {
+  background: color-mix(in srgb, #f87171 15%, transparent);
+  color: #e05252;
+}
+
+.wmc-bf-chip-ico .svg-icon {
+  width: 11px;
+  height: 11px;
+}
+
+/* 逐篇列表 */
+.wmc-bf-list {
+  max-height: 290px;
+  overflow-y: auto;
+  margin: 0 18px;
+  border: 1px solid var(--wmc-line);
+  border-radius: var(--wmc-r-md);
+  background: var(--wmc-inset);
+}
+
+.wmc-bf-list-empty {
+  padding: 18px;
+  font-size: 11.5px;
+  color: var(--wmc-ink-4);
+  text-align: center;
 }
 
 .wmc-bf-row {
   display: flex;
   align-items: center;
   gap: 8px;
-  height: 27px;
-  padding: 0 9px;
-  border-bottom: 1px solid color-mix(in srgb, var(--wmc-line) 55%, transparent);
-  font-size: 12px;
+  height: 29px;
+  padding: 0 10px;
+  border-bottom: 1px solid color-mix(in srgb, var(--wmc-line) 50%, transparent);
 }
 
 .wmc-bf-row:last-child {
   border-bottom: 0;
 }
 
+.wmc-bf-row:hover {
+  background: var(--wmc-hover);
+}
+
 .wmc-bf-ico {
-  flex: 0 0 14px;
+  flex: 0 0 13px;
   display: inline-flex;
   color: var(--wmc-ink-4);
 }
 
 .wmc-bf-ico .svg-icon {
-  width: 13px;
-  height: 13px;
+  width: 12px;
+  height: 12px;
 }
 
 .wmc-bf-row.is-running {
@@ -1926,44 +2225,53 @@
 }
 
 .wmc-bf-row.is-failed {
-  background: color-mix(in srgb, #f87171 9%, transparent);
+  background: color-mix(in srgb, #f87171 7%, transparent);
 }
 
 .wmc-bf-row.is-failed .wmc-bf-ico {
   color: #f87171;
 }
 
-.wmc-bf-title {
+.wmc-bf-name {
   flex: 1 1 auto;
   min-width: 0;
   overflow: hidden;
+  font-size: 12px;
   color: var(--wmc-ink-2);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.wmc-bf-ms {
+.wmc-bf-time {
   flex: 0 0 auto;
-  font-size: 10.5px;
+  font-size: 10px;
   color: var(--wmc-ink-4);
   font-variant-numeric: tabular-nums;
 }
 
-.wmc-bf-note {
+.wmc-bf-tag {
   flex: 0 0 auto;
-  font-size: 10.5px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: var(--wmc-hover);
+  font-size: 10px;
   color: var(--wmc-ink-4);
+  white-space: nowrap;
 }
 
-.wmc-bf-note.is-bad {
-  color: #f87171;
+.wmc-bf-tag.is-done {
+  background: color-mix(in srgb, #34c98e 14%, transparent);
+  color: #2fae7c;
 }
 
-.wmc-bf-empty {
-  padding: 16px;
-  font-size: 11.5px;
-  color: var(--wmc-ink-4);
-  text-align: center;
+.wmc-bf-tag.is-failed {
+  background: color-mix(in srgb, #f87171 15%, transparent);
+  color: #e05252;
+}
+
+.wmc-bf-tag.is-running {
+  background: var(--wmc-brand-soft);
+  color: var(--wmc-brand-fg);
 }
 
 .wmc-bf-ico.is-spin .svg-icon {
@@ -1976,8 +2284,51 @@
   }
 }
 
-.wmc-progress-fill.is-error {
-  background: #f87171;
+/* 底部 */
+.wmc-bf-foot {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 14px 18px 6px;
+}
+
+.wmc-bf-btn {
+  height: 30px;
+  padding: 0 14px;
+  border: 1px solid var(--wmc-line-2);
+  border-radius: var(--wmc-r-sm);
+  background: transparent;
+  font-size: 12.5px;
+  color: var(--wmc-ink-2);
+  box-shadow: none;
+  cursor: pointer;
+  transition: background var(--wmc-120) var(--wmc-ease);
+}
+
+.wmc-bf-btn:hover {
+  background: var(--wmc-hover);
+}
+
+.wmc-bf-btn.is-primary {
+  border-color: var(--wmc-brand);
+  background: var(--wmc-brand);
+  color: #fff;
+}
+
+.wmc-bf-btn.is-primary:hover {
+  filter: brightness(1.08);
+}
+
+.wmc-bf-btn.is-warn {
+  border-color: color-mix(in srgb, #f87171 40%, transparent);
+  color: #e05252;
+}
+
+@media (max-width: 620px) {
+  .wmc-bf-two,
+  .wmc-bf-seg {
+    grid-template-columns: 1fr;
+  }
 }
 
 /* ---------------------------------- menu --------------------------------- */
