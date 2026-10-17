@@ -2836,6 +2836,7 @@ class WMSettingTab extends PluginSettingTab {
       a.rel = 'noopener noreferrer';
     };
     addLink('GitHub', 'https://github.com/pixelxzen');
+    addLink('小红书', 'https://www.xiaohongshu.com/user/profile/5b80023bd72b6300011273e6');
     addLink('问题反馈', 'https://github.com/pixelxzen/Zisuzi-Weread-MP/issues');
     addLink('更新日志', 'https://github.com/pixelxzen/Zisuzi-Weread-MP/releases');
 
