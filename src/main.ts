@@ -351,6 +351,75 @@ export default class WereadMpCatcher extends Plugin {
     return r1;
   };
 
+  /**
+   * 从正在运行的 Chrome 通过 CDP 读取完整登录态（含 wr_gid 这类会话级 cookie）。
+   * 前提：Chrome 以 --remote-debugging-port=9222 启动；已经登录过 weread.qq.com。
+   */
+  async importCookieFromChrome(): Promise<string> {
+    let targets: any[] = [];
+    try {
+      const r = await requestUrl({ url: 'http://127.0.0.1:9222/json', method: 'GET', throw: false });
+      if (r.status !== 200) throw new Error(`HTTP ${r.status}`);
+      targets = JSON.parse(r.text);
+    } catch (e) {
+      return `CDP_OFF：连不上 127.0.0.1:9222（${String(e).slice(0, 50)}）`;
+    }
+    const page = targets.find((t) => t.type === 'page' && t.webSocketDebuggerUrl) || targets[0];
+    if (!page?.webSocketDebuggerUrl) return 'CDP_OFF：没有可用页面';
+
+    let cookies: any[] = [];
+    try {
+      cookies = await new Promise<any[]>((resolve, reject) => {
+        const ws = new WebSocket(page.webSocketDebuggerUrl);
+        const timer = window.setTimeout(() => {
+          try {
+            ws.close();
+          } catch {
+            /* noop */
+          }
+          reject(new Error('WebSocket 超时'));
+        }, 8000);
+        ws.onopen = () => ws.send(JSON.stringify({ id: 1, method: 'Network.getAllCookies' }));
+        ws.onmessage = (ev) => {
+          try {
+            const msg = JSON.parse(String(ev.data));
+            if (msg.id === 1 && Array.isArray(msg.result?.cookies)) {
+              window.clearTimeout(timer);
+              ws.close();
+              resolve(msg.result.cookies);
+            }
+          } catch {
+            /* 忽略非 JSON 帧 */
+          }
+        };
+        ws.onerror = () => {
+          window.clearTimeout(timer);
+          reject(new Error('WebSocket 错误'));
+        };
+      });
+    } catch (e) {
+      return `CDP_FAIL：${String(e).slice(0, 60)}`;
+    }
+
+    const wr = cookies.filter((c) => String(c.name).startsWith('wr_') && /weread/.test(String(c.domain)));
+    if (!wr.length) return 'NO_WEREAD_COOKIE：Chrome 里没找到 weread 登录态，先在浏览器登录一次';
+    const jar: Record<string, string> = {};
+    for (const c of wr) jar[c.name] = c.value;
+    if (!jar.wr_vid || !jar.wr_skey) return `INCOMPLETE：只拿到 ${Object.keys(jar).join(',')}`;
+
+    this.settings.cookie = Object.entries(jar).map(([k, v]) => `${k}=${v}`).join('; ');
+    this.settings.useSession = false;
+    await this.saveAll();
+    const web = await this.checkWebLogin();
+    await this.refreshProfile().catch(() => null);
+    await this.syncAccountsFromShelf().catch(() => 0);
+    this.notifyViews();
+    this.renderStatus();
+    return web.ok
+      ? `OK：导入 ${wr.length} 项（含 ${jar.wr_gid ? 'wr_gid' : '无 wr_gid'}）· ${web.msg}`
+      : `IMPORTED_BUT_BAD：导入 ${wr.length} 项，但列表仍不通：${web.msg}`;
+  }
+
   /** 探测 Obsidian 自带 session 里是否有有效登录态（不依赖已移除的 electron.remote） */
   async probeSessionLogin(): Promise<boolean> {
     const UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
@@ -1976,6 +2045,19 @@ class WMSettingTab extends PluginSettingTab {
     // 高级：手动 Cookie（渐进展开，不占视觉）
     const adv = containerEl.createEl('details', { cls: 'wmc-adv' });
     adv.createEl('summary', { text: '高级：手动 Cookie / 诊断' });
+    new Setting(adv)
+      .setName('从 Chrome 导入登录态')
+      .setDesc(
+        'Chrome 用 `open -a "Google Chrome" --args --remote-debugging-port=9222` 启动（先完全退出 Chrome），' +
+          '并登录过 weread.qq.com。这样能拿到含 wr_gid 的完整 cookie。',
+      )
+      .addButton((b) =>
+        b.setButtonText('导入').onClick(async () => {
+          const r = await this.plugin.importCookieFromChrome();
+          new Notice(r, r.startsWith('OK') ? 12000 : 16000);
+          this.display();
+        }),
+      );
     new Setting(adv)
       .setName('诊断登录态')
       .setDesc('把 cookie 与 Obsidian session 的探测结果写入插件目录 诊断.txt')
