@@ -403,6 +403,32 @@ export default class WereadMpCatcher extends Plugin {
 
   /* ------------------------------ 扫码登录 ------------------------------ */
 
+  /** 登出：清本地登录态 + 清 Electron session 里 weread 域 cookie（不清的话重扫码还是旧账号） */
+  async logout(): Promise<void> {
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      const electron: any = (window as any).require?.('electron');
+      const session = electron?.remote?.session?.defaultSession;
+      if (session?.clearStorageData) {
+        await session.clearStorageData({ origin: 'https://weread.qq.com', storages: ['cookies'] });
+      }
+    } catch {
+      /* 非 Electron 环境跳过 */
+    }
+    this.settings.cookie = '';
+    this.settings.wereadApiKey = '';
+    this.settings.loginProfile = undefined;
+    try {
+      const avatarPath = `${this.manifest.dir}/avatar.jpg`;
+      if (await this.app.vault.adapter.exists(avatarPath)) await this.app.vault.adapter.remove(avatarPath);
+    } catch {
+      /* noop */
+    }
+    await this.saveAll();
+    this.renderStatus();
+    this.emitWatch();
+  }
+
   loginState(): 'none' | 'cookie' | 'full' {
     const ck = checkCookie(this.settings.cookie || '');
     const hasKey = /^wrk-/.test(this.settings.wereadApiKey || '');
@@ -1119,7 +1145,7 @@ class WMSettingTab extends PluginSettingTab {
       });
     }
 
-    new Setting(containerEl)
+    const loginSetting = new Setting(containerEl)
       .setName('扫码登录')
       .setDesc('打开微信读书窗口扫码；完成后自动保存登录态、换出官方 API Key、同步书架公众号')
       .addButton((b) =>
@@ -1127,7 +1153,18 @@ class WMSettingTab extends PluginSettingTab {
           .setButtonText(st === 'full' ? '重新扫码' : '扫码登录')
           .setCta()
           .onClick(() => void this.plugin.startQrLogin()),
-      )
+      );
+    if (st !== 'none') {
+      loginSetting.addButton((b) =>
+        b.setButtonText('切换账号').onClick(async () => {
+          await this.plugin.logout();
+          this.display();
+          new Notice('已退出。正在打开登录窗口，扫码登录新账号…', 6000);
+          this.plugin.startQrLogin();
+        }),
+      );
+    }
+    loginSetting
       .addButton((b) =>
         b.setButtonText('同步书架').onClick(async () => {
           const n = await this.plugin.syncAccountsFromShelf();
