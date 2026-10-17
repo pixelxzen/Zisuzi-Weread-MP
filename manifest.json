@@ -1,9 +1,9 @@
 {
   "id": "zisuzi-weread-mp",
   "name": "Zisuzi-Weread-MP",
-  "version": "4.0.0",
+  "version": "4.0.1",
   "minAppVersion": "1.4.0",
-  "description": "微信读书公众号盯采：登录后自动抓取书架里订阅的公众号更新，把每篇文章（含图片）归档为本地 Markdown 笔记。",
+  "description": "Archive WeChat Official Account articles from your WeRead shelf as local Markdown notes, with images and media saved locally.",
   "author": "紫苏子ACG",
   "authorUrl": "https://github.com/pixelxzen",
   "isDesktopOnly": true

@@ -1,7 +1,7 @@
 {
   "name": "zisuzi-weread-mp",
-  "version": "4.0.0",
-  "description": "微信读书公众号盯采：登录后自动抓取书架公众号更新，归档为 Obsidian 笔记。",
+  "version": "4.0.1",
+  "description": "Archive WeChat Official Account articles from your WeRead shelf as local Markdown notes.",
   "main": "main.js",
   "type": "module",
   "author": "紫苏子ACG",
