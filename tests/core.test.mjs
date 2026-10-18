@@ -55,8 +55,38 @@ test('checkCookie 缺 wr_gid 时判定不完整', () => {
   const r = wr.checkCookie(bad);
   assert.equal(r.ok, false);
   assert.deepEqual(r.missing, ['wr_gid']);
+  assert.deepEqual(r.empty, []);
   const good = wr.checkCookie('wr_vid=1; wr_skey=2; wr_rt=3; wr_gid=4');
   assert.equal(good.ok, true);
+});
+
+// 实测回归：v4.4.3 及以前只看字段在不在，于是「四项齐、值全空」的坏 cookie 判成 ok，
+// 界面显示已登录、一同步必 -2012。见 docs/REVIEW-4.4.4.md
+test('checkCookie 字段存在但值为空 → 不完整（empty 命中）', () => {
+  const hollow = 'wr_vid=; wr_skey=; wr_rt=; wr_gid=';
+  const r = wr.checkCookie(hollow);
+  assert.equal(r.ok, false);
+  assert.deepEqual(r.missing, []);
+  assert.deepEqual(r.empty, ['wr_vid', 'wr_skey', 'wr_rt', 'wr_gid']);
+  assert.match(wr.describeCookieCheck(r), /值为空/);
+});
+
+test('checkCookie 只缺值不报 missing、只缺键不报 empty', () => {
+  const partialEmpty = 'wr_vid=5617686; wr_skey=; wr_rt=R; wr_gid=G';
+  const a = wr.checkCookie(partialEmpty);
+  assert.deepEqual(a.missing, []);
+  assert.deepEqual(a.empty, ['wr_skey']);
+
+  const partialMissing = 'wr_vid=5617686; wr_skey=S; wr_rt=R';
+  const b = wr.checkCookie(partialMissing);
+  assert.deepEqual(b.missing, ['wr_gid']);
+  assert.deepEqual(b.empty, []);
+});
+
+test('checkCookie 值里含 = 号仍能正确切分', () => {
+  const c = wr.checkCookie('wr_vid=1; wr_skey=abc==; wr_rt=3; wr_gid=4');
+  assert.equal(c.ok, true);
+  assert.deepEqual(c.empty, []);
 });
 
 test('normalizeCookie 去前缀与多余空白', () => {

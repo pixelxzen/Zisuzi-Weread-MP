@@ -48,17 +48,41 @@ export function normalizeCookie(raw: string): string {
     .join('; ');
 }
 
-/** 完整性检查：缺 wr_gid 会稳定拿到 -2012（实测） */
-export function checkCookie(cookie: string): { ok: boolean; missing: string[] } {
+export interface CookieCheck {
+  ok: boolean;
+  /** 必需字段整个缺失 */
+  missing: string[];
+  /** 字段在，但值是空的（这类 cookie 格式合法、接口必定 -2012） */
+  empty: string[];
+}
+
+/**
+ * 完整性检查。
+ * 两条都会稳定拿到 -2012，必须一起判：
+ *  - 缺 wr_gid 等必需字段；
+ *  - 必需字段存在但值为空（实测：从没登录过的会话读出来的就是这种「四项齐、值全空」，
+ *    旧实现只看键存在 → 判 ok → 界面显示已登录，一抓就报过期）。
+ */
+export function checkCookie(cookie: string): CookieCheck {
   const norm = normalizeCookie(cookie);
-  const have = new Set(
-    norm
-      .split(';')
-      .map((s) => s.split('=')[0].trim()),
-  );
+  const kv = new Map<string, string>();
+  for (const part of norm.split(';')) {
+    const i = part.indexOf('=');
+    if (i < 0) continue;
+    kv.set(part.slice(0, i).trim(), part.slice(i + 1).trim());
+  }
   const need = ['wr_vid', 'wr_skey', 'wr_rt', 'wr_gid'];
-  const missing = need.filter((n) => !have.has(n));
-  return { ok: missing.length === 0, missing };
+  const missing = need.filter((n) => !kv.has(n));
+  const empty = need.filter((n) => kv.has(n) && !kv.get(n));
+  return { ok: missing.length === 0 && empty.length === 0, missing, empty };
+}
+
+/** 把 checkCookie 的结论翻成人话（给 Notice / 状态条用） */
+export function describeCookieCheck(chk: CookieCheck): string {
+  const parts: string[] = [];
+  if (chk.missing.length) parts.push(`缺 ${chk.missing.join(', ')}`);
+  if (chk.empty.length) parts.push(`${chk.empty.join(', ')} 的值为空`);
+  return parts.join('；');
 }
 
 export function baseHeaders(cookie: string): Record<string, string> {
@@ -206,7 +230,9 @@ export async function probeAccess(http: HttpFn, cookie: string, bookId = 'mpbook
   }
   if (!chk.ok) {
     out.verdict = 'expired';
-    out.hint = `Cookie 缺 ${chk.missing.join(', ')}（缺 wr_gid 会稳定报 -2012）`;
+    out.hint = chk.empty.length
+      ? `Cookie 不完整：${describeCookieCheck(chk)}。值为空说明这份登录态没真正拿到，重新扫码即可`
+      : `Cookie 缺 ${chk.missing.join(', ')}（缺 wr_gid 会稳定报 -2012）`;
   }
 
   // ① 会话是否还活着（只看 /web/user，不看 mp 接口）

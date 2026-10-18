@@ -1,6 +1,6 @@
 {
   "name": "zisuzi-weread-mp",
-  "version": "4.4.3",
+  "version": "4.4.4",
   "description": "Archive WeChat Official Account articles from your WeRead shelf as local Markdown notes.",
   "main": "main.js",
   "type": "module",

@@ -15,10 +15,12 @@ import {
 import {
   WereadClient,
   checkCookie,
+  describeCookieCheck,
   normalizeCookie,
   fetchProfile,
   fetchCurrentUser,
   probeAccess,
+  type AccessProbe,
   type ArticleItem,
   type HttpFn,
   RiskError,
@@ -666,6 +668,7 @@ export default class WereadMpCatcher extends Plugin {
         if (chk.ok) {
           this.settings.cookie = ck;
           await this.saveAll();
+          void this.verifyCookieLive(false);
           this.emitWatch();
           return true;
         }
@@ -685,6 +688,7 @@ export default class WereadMpCatcher extends Plugin {
     }
     this.settings.cookie = ck;
     await this.saveAll();
+    await this.verifyCookieLive(true);
     return true;
   }
 
@@ -1251,6 +1255,54 @@ export default class WereadMpCatcher extends Plugin {
   hasLogin(): boolean {
     if (this.settings.useSession) return true;
     return checkCookie(normalizeCookie(this.settings.cookie || '')).ok;
+  }
+
+  /**
+   * 保存 cookie 后用**真实列表接口**再验一次。
+   * 「格式完整」不等于「服务端认」——旧版本只判字段存在，于是「四项齐、值全空」的
+   * 坏 cookie 在界面上显示已登录，一抓就 -2012。这里把判定升级为「格式 + 接口」双判。
+   * @param notify true = 用户主动保存，用 Notice 汇报；false = 后台轮询，只更新状态
+   */
+  async verifyCookieLive(notify = false): Promise<AccessProbe | null> {
+    const ck = normalizeCookie(this.settings.cookie || '');
+    if (!ck) return null;
+    const stamp = Date.now();
+    const chk = checkCookie(ck);
+
+    if (!chk.ok) {
+      this.settings.webLoginOk = false;
+      this.settings.webLoginAt = stamp;
+      this.settings.webLoginMsg = `登录信息不完整：${describeCookieCheck(chk)}（需重新扫码）`;
+      await this.saveAll();
+      this.notifyViews();
+      if (notify) new Notice(this.settings.webLoginMsg, 12000);
+      return null;
+    }
+
+    const probe = await probeAccess(this.http, ck).catch(() => null);
+    if (!probe) {
+      this.settings.webLoginOk = false;
+      this.settings.webLoginAt = stamp;
+      this.settings.webLoginMsg = '接口探针无响应（网络超时），稍后重试';
+      await this.saveAll();
+      if (notify) new Notice('没连上微信读书接口，稍后再试', 10000);
+      return null;
+    }
+
+    this.settings.webLoginOk = probe.verdict === 'ok';
+    this.settings.webLoginAt = stamp;
+    this.settings.webLoginMsg = probe.hint;
+    await this.saveAll();
+    this.notifyViews();
+    if (notify) {
+      new Notice(
+        probe.verdict === 'ok'
+          ? `登录态已验证可用${probe.account ? `：${probe.account}` : ''}`
+          : `登录态存疑：${probe.hint}`,
+        probe.verdict === 'ok' ? 8000 : 14000,
+      );
+    }
+    return probe;
   }
 
   loginState(): 'none' | 'cookie' | 'full' {
@@ -2338,6 +2390,8 @@ class WMSettingTab extends PluginSettingTab {
       async (v) => {
         this.plugin.settings.cookie = v.trim();
         await this.plugin.saveAll();
+        // 保存即验证：直接把「格式完整但服务端过期」在当场点出来
+        await this.plugin.verifyCookieLive(true);
       },
       {
         placeholder: 'wr_vid=…; wr_skey=…; wr_rt=…; wr_gid=…',
