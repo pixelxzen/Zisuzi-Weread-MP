@@ -1,13 +1,5 @@
 # Zisuzi-Weread-MP
 
-**微信读书公众号盯采 · 在 Obsidian 里自动归档你书架里订阅的公众号文章（含图片、音视频）。**
-
-> 公众号文章看不过来、也不该锁在微信里。一次扫码，之后新文章自动落进你的知识库。
-
-- 数据直连你自己的微信读书账号，**不经任何第三方服务器中转**
-- 不碰微信客户端，不破解任何服务
-- 免费（唯一的可选开销是你自己配置的大模型 token）
-
 ## English
 
 Zisuzi-Weread-MP archives the WeChat Official Account articles you subscribe to on
@@ -62,6 +54,18 @@ Search **Zisuzi-Weread-MP** in `Settings → Community plugins → Browse`, or d
 - The WeRead endpoints are private APIs and may change; that is the main maintenance cost.
 
 ---
+
+---
+
+## 中文说明
+
+**微信读书公众号盯采 · 在 Obsidian 里自动归档你书架里订阅的公众号文章（含图片、音视频）。**
+
+> 公众号文章看不过来、也不该锁在微信里。一次扫码，之后新文章自动落进你的知识库。
+
+- 数据直连你自己的微信读书账号，**不经任何第三方服务器中转**
+- 不碰微信客户端，不破解任何服务
+- 免费（唯一的可选开销是你自己配置的大模型 token）
 
 ## 功能
 
