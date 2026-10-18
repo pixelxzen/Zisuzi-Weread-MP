@@ -11,3 +11,6 @@ scripts/*.cjs
 skills-lock.json
 *.bak-*
 *.bak
+
+# 宣传片构建产物（依赖 /tmp 中间文件，不进仓库）
+docs/promo-video-v5/
