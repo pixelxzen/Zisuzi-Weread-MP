@@ -195,8 +195,8 @@ export class WmcView extends ItemView {
   }
 
   private toggleList(): void {
-    const wrap = this.contentEl.querySelector('.wmc-listwrap') as HTMLElement | null;
-    const resizer = this.contentEl.querySelector('.wmc-resizer') as HTMLElement | null;
+    const wrap = this.contentEl.querySelector<HTMLElement>('.wmc-listwrap');
+    const resizer = this.contentEl.querySelector<HTMLElement>('.wmc-resizer');
     if (!wrap) return;
     const hidden = wrap.hasClass('is-hidden');
     wrap.toggleClass('is-hidden', !hidden);
@@ -304,7 +304,7 @@ export class WmcView extends ItemView {
     let i = 0;
     const chunk = 80;
     const draw = () => {
-      const frag = document.createDocumentFragment();
+      const frag = createFragment();
       const end = Math.min(rows.length, i + chunk);
       for (; i < end; i++) frag.appendChild(this.renderRow(rows[i]));
       el.appendChild(frag);
@@ -314,7 +314,7 @@ export class WmcView extends ItemView {
   }
 
   private renderRow(r: RowItem): HTMLElement {
-    const row = createEl('div', { cls: 'wmc-row' });
+    const row = createDiv({ cls: 'wmc-row' });
     if (r.reviewId === this.selectedId) row.addClass('is-selected');
     if (r.read) row.addClass('is-read');
 
@@ -373,7 +373,8 @@ export class WmcView extends ItemView {
       aiBtn.addEventListener('click', () => void this.aiSummarize(r));
     } else {
       const grabBtn = actions.createEl('button', { cls: 'wmc-text-btn is-primary', text: '抓取并归档' });
-      grabBtn.addEventListener('click', async () => {
+      grabBtn.addEventListener('click', () => {
+        void (async () => {
         grabBtn.disabled = true;
         grabBtn.setText('抓取中…');
         const ok = await this.plugin.archiveSingle(r.reviewId, r.account);
@@ -384,6 +385,7 @@ export class WmcView extends ItemView {
         } else {
           grabBtn.setText('抓取失败，重试');
         }
+          })();
       });
     }
 

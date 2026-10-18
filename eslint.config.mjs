@@ -1,32 +1,23 @@
-import js from '@eslint/js';
-import tseslint from 'typescript-eslint';
+import { defineConfig } from 'eslint/config';
+import obsidianmd from 'eslint-plugin-obsidianmd';
 
 /**
- * 本地复现 Obsidian 社区扫描器的 type-checked 规则集。
- * 社区用的是 typescript-eslint 的 recommendedTypeChecked，
- * 这里对齐同一套，好让本地 lint 结果和社区页面一致。
+ * 对齐 Obsidian 社区扫描器：使用官方 eslint-plugin-obsidianmd 的 recommended 配置。
+ * 本地 lint 结果应与 community.obsidian.md 后台 Review 的 SOURCE CODE 一节一致。
  */
-export default tseslint.config(
-  js.configs.recommended,
-  ...tseslint.configs.recommendedTypeChecked,
+export default defineConfig([
+  ...obsidianmd.configs.recommended,
   {
     languageOptions: {
       parserOptions: {
-        projectService: true,
+        projectService: {
+          allowDefaultProject: ['eslint.config.*'],
+        },
         tsconfigRootDir: import.meta.dirname,
       },
     },
-    rules: {
-      // 只关心社区会报的三类
-      '@typescript-eslint/no-unsafe-argument': 'warn',
-      '@typescript-eslint/no-unsafe-call': 'warn',
-      '@typescript-eslint/no-unsafe-member-access': 'warn',
-      '@typescript-eslint/no-unsafe-assignment': 'off',
-      '@typescript-eslint/no-unsafe-return': 'off',
-      // 这条在 Obsidian 插件里天然会撞（DOM 类型）
-      '@typescript-eslint/no-explicit-any': 'off',
-      'no-unused-vars': 'off',
-      '@typescript-eslint/no-unused-vars': 'off',
-    },
   },
-);
+  {
+    ignores: ['main.js', 'dist/**', 'node_modules/**', 'qa-vault/**', 'scripts/**', 'tests/**'],
+  },
+]);

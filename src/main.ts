@@ -9,8 +9,8 @@ import {
   type TAbstractFile,
   normalizePath,
   requestUrl,
-  type RequestUrlParam,
   setIcon,
+  type SettingDefinitionItem,
 } from 'obsidian';
 import {
   WereadClient,
@@ -51,10 +51,8 @@ import { WereadAgentApi, fetchApiKey } from './core/weread-api';
 import {
   LLM_DEFAULTS,
   PROVIDERS,
-  chat as llmChat,
   summarize as llmSummarize,
   testConnection as testLLM,
-  estimateTokens,
   quotaToday,
   checkQuota,
   validateConfig,
@@ -164,7 +162,6 @@ const DEFAULTS: WMSettings = {
 };
 
 const MIN_INTERVAL = 15; // 风控下限：低于 15 分钟不进风控红线
-const ID = 'zisuzi-weread-mp';
 
 const sleep = (ms: number) => new Promise<void>((r) => window.setTimeout(r, ms));
 
@@ -516,6 +513,11 @@ export default class WereadMpCatcher extends Plugin {
       callback: () => this.openLoginWindow(),
     });
     this.addCommand({
+      id: 'logout-account',
+      name: '退出微信读书账号（清空登录态后可重新扫码）',
+      callback: () => void this.logoutAccount(),
+    });
+    this.addCommand({
       id: 'repair-images',
       name: '补全当前笔记的图片（重新采集）',
       callback: () => void this.repairActiveNote(),
@@ -527,7 +529,7 @@ export default class WereadMpCatcher extends Plugin {
     });
     this.addCommand({
       id: 'toggle-theme',
-      name: '切换界面主题（Linear ⇄ 紫苏子品牌）',
+      name: '切换界面主题（linear ⇄ 紫苏子品牌）',
       callback: async () => {
         this.settings.theme = this.settings.theme === 'brand' ? 'linear' : 'brand';
         await this.saveAll();
@@ -639,13 +641,13 @@ export default class WereadMpCatcher extends Plugin {
   openLoginWindow() {
     const w = window.open('https://weread.qq.com/', '_blank');
     if (!w) {
-      new Notice('无法打开窗口：请改用浏览器登录后粘贴 Cookie');
+      new Notice('无法打开窗口：请改用浏览器登录后粘贴 cookie');
       return;
     }
     new Notice('扫码登录中…完成后会自动写入（最长等 90 秒）', 6000);
     void this.waitForMatureCookie(90000).then((ok) => {
       if (ok) {
-        new Notice('登录成功，完整 Cookie 已写入');
+        new Notice('登录成功，完整 cookie 已写入');
         void this.refreshApiKey();
         void this.refreshProfile();
       } else {
@@ -1013,6 +1015,8 @@ export default class WereadMpCatcher extends Plugin {
 
   /** 登出：清本地登录态 + 清 Electron session 里 weread 域 cookie（不清的话重扫码还是旧账号） */
   async logout(): Promise<void> {
+    // 正在盯采就先停掉，否则空 cookie 的轮询会刷一堆 -2012 错误
+    if (this.timer !== null) this.stopWatch(false);
     try {
       // 运行时按需加载 electron 模块：静态 import 会在移动端直接崩
       const session = electronModule()?.remote?.session?.defaultSession;
@@ -1025,6 +1029,10 @@ export default class WereadMpCatcher extends Plugin {
     this.settings.cookie = '';
     this.settings.wereadApiKey = '';
     this.settings.loginProfile = undefined;
+    // 网页登录态是上一次实测结果，登出后必须回到「未检测」，否则界面还显示正常
+    this.settings.webLoginOk = undefined;
+    this.settings.webLoginAt = undefined;
+    this.settings.webLoginMsg = '';
     // 切换账号必须清掉旧账号的书架/勾选/文章索引，否则两个账号数据混在一个视图里
     this.settings.accounts = [];
     this.settings.shelfAccounts = [];
@@ -1042,6 +1050,16 @@ export default class WereadMpCatcher extends Plugin {
     this.renderStatus();
     this.notifyViews(); // 立刻清掉旧账号的头像 / 昵称 / 订阅列表残影
     this.emitWatch();
+  }
+
+  /** 退出登录（命令面板 / 顶部按钮 / 设置页共用）：清干净后让用户自己重新扫码 */
+  async logoutAccount(): Promise<void> {
+    if (this.loginState() === 'none') {
+      new Notice('当前没有登录微信读书账号');
+      return;
+    }
+    await this.logout();
+    new Notice('已退出微信读书账号：本机登录态、书架缓存、头像都已清空，可以重新扫码登录了。', 8000);
   }
 
   /**
@@ -1097,7 +1115,7 @@ export default class WereadMpCatcher extends Plugin {
       if (wv && typeof wv.executeJavaScript === 'function') {
         try {
           const raw = await wv.executeJavaScript('document.cookie');
-          const str = String(raw || '');
+          const str = typeof raw === 'string' ? raw : '';
           if (/wr_skey=/.test(str) && /wr_vid=/.test(str)) {
             this.settings.cookie = normalizeCookie(str);
             this.settings.useSession = false;
@@ -1504,7 +1522,7 @@ export default class WereadMpCatcher extends Plugin {
     }
     const cookie = normalizeCookie(this.settings.cookie || '');
     if (!cookie) {
-      if (manual) new Notice('还没登录：设置里粘贴 Cookie 或点击「打开登录窗口」');
+      if (manual) new Notice('还没登录：设置里粘贴 cookie 或点击「打开登录窗口」');
       return;
     }
     const chk = checkCookie(cookie);
@@ -1513,7 +1531,7 @@ export default class WereadMpCatcher extends Plugin {
     }
     const accounts = this.settings.accounts.filter((a) => a.bookId?.startsWith('MP_WXS_'));
     if (!accounts.length) {
-      if (manual) new Notice('还没有公众号：设置里添加 bookId（MP_WXS_xxx）');
+      if (manual) new Notice('还没有公众号：设置里添加 bookid（mp_wxs_xxx）');
       return;
     }
 
@@ -1926,7 +1944,6 @@ export default class WereadMpCatcher extends Plugin {
     const todo = tasks
       .filter((t) => t.state === 'pending')
       .slice(0, opts.maxItems > 0 ? opts.maxItems : tasks.length);
-    const byId = new Map(tasks.map((t) => [t.reviewId, t]));
     const itemMap = new Map(scope.map((it) => [it.reviewId, it]));
     const emit = (done: number, written: number) => {
       const archivedAll = tasks.filter((t) => t.state === 'done' || t.state === 'skipped').length;
@@ -2045,14 +2062,14 @@ export default class WereadMpCatcher extends Plugin {
       });
       const v = inMain.view as unknown as { render?: () => void };
       v?.render?.();
-      workspace.revealLeaf(inMain);
+      void workspace.revealLeaf(inMain);
       return;
     }
     leaves.forEach((l) => l.detach());
     // 主标签页打开（对齐 qiaomu-home 的观感），不用右侧插件栏
     const leaf = workspace.getLeaf('tab');
     await leaf.setViewState({ type: VIEW_TYPE_WMC, active: true });
-    workspace.revealLeaf(leaf);
+    void workspace.revealLeaf(leaf);
   }
 
   isWatching(): boolean {
@@ -2102,7 +2119,7 @@ export default class WereadMpCatcher extends Plugin {
     };
     const cookie = normalizeCookie(this.settings.cookie || '');
     if (!cookie) {
-      new Notice('还没登录：设置里填 Cookie');
+      new Notice('还没登录：设置里填 cookie');
       return false;
     }
     const client = new WereadClient(this.http, cookie);
@@ -2174,10 +2191,32 @@ class WMSettingTab extends PluginSettingTab {
     this.plugin = plugin;
   }
 
-  display(): void {
-    const { containerEl } = this;
-    containerEl.empty();
-    containerEl.addClass('wmc-settings');
+  /**
+   * Obsidian 1.13+ 声明式设置入口。
+   * 整个设置页是手写 DOM（不用原生 Setting 行），所以用一条 render 型定义把页面接管下来：
+   * 声明式 API 只负责挂载与搜索索引，视觉与交互仍走自定义设计系统。
+   */
+  getSettingDefinitions(): SettingDefinitionItem[] {
+    return [
+      {
+        name: '微信读书公众号盯采',
+        render: (setting) => {
+          const host = setting.settingEl;
+          host.empty();
+          host.addClass('wmc-settings', 'wmc-settings-host');
+          this.renderBody(host);
+          return () => host.removeClass('wmc-settings', 'wmc-settings-host');
+        },
+      },
+    ];
+  }
+
+  /** 立即重绘设置页（声明式 api 下改状态后调用） */
+  private refreshUI(): void {
+    this.update();
+  }
+
+  private renderBody(containerEl: HTMLElement): void {
 
     /* 1. 登录 */
     containerEl.createDiv({ cls: 'wmc-settings-h', text: '登录' });
@@ -2226,7 +2265,7 @@ class WMSettingTab extends PluginSettingTab {
     // 有登录态但还没拉过资料时，异步补一次（不阻塞界面）
     if (!prof && st !== 'none') {
       void this.plugin.refreshProfile().then((p) => {
-        if (p) this.display();
+        if (p) this.refreshUI();
       });
     }
 
@@ -2239,12 +2278,11 @@ class WMSettingTab extends PluginSettingTab {
     ];
     if (st !== 'none') {
       loginBtns.push({
-        text: '切换账号',
+        text: '退出登录',
         onClick: async () => {
-          await this.plugin.logout();
-          this.display();
-          new Notice('已退出。正在打开登录窗口，扫码登录新账号…', 6000);
-          this.plugin.startQrLogin();
+          // 彻底清态：cookie / 官方 Key / 头像 / 书架缓存 / 网页登录态，清完可干净重扫
+          await this.plugin.logoutAccount();
+          this.refreshUI();
         },
       });
     }
@@ -2254,7 +2292,7 @@ class WMSettingTab extends PluginSettingTab {
         onClick: async () => {
           const n = await this.plugin.syncAccountsFromShelf();
           new Notice(n ? `已同步 ${n} 个公众号` : '同步失败：先完成扫码登录');
-          this.display();
+          this.refreshUI();
         },
       },
       {
@@ -2273,7 +2311,7 @@ class WMSettingTab extends PluginSettingTab {
 
     // 高级：手动 Cookie（渐进展开，不占视觉）
     const adv = containerEl.createEl('details', { cls: 'wmc-adv' });
-    adv.createEl('summary', { text: '高级：手动 Cookie / 诊断' });
+    adv.createEl('summary', { text: '高级：手动 cookie / 诊断' });
     this.frButtons(
       adv,
       '从 Chrome 导入登录态',
@@ -2284,7 +2322,7 @@ class WMSettingTab extends PluginSettingTab {
           onClick: async () => {
             const r = await this.plugin.importCookieFromChrome();
             new Notice(r, r.startsWith('OK') ? 12000 : 16000);
-            this.display();
+            this.refreshUI();
           },
         },
       ],
@@ -2309,7 +2347,7 @@ class WMSettingTab extends PluginSettingTab {
           onClick: async () => {
             const k = await this.plugin.refreshApiKey();
             new Notice(k ? '已获取官方 API Key' : '换取失败：登录态无效');
-            if (k) this.display();
+            if (k) this.refreshUI();
           },
         },
       },
@@ -2328,12 +2366,12 @@ class WMSettingTab extends PluginSettingTab {
       async (v) => {
         this.plugin.settings.agent.preset = v;
         await this.plugin.saveAll();
-        this.display();
+        this.refreshUI();
       },
       {
         text: '测试连接',
         onClick: async () => {
-          const t = new Notice('正在测试 Agent…', 0);
+          const t = new Notice('正在测试 agent…', 0);
           try {
             const r = await this.plugin.runAgent('只回四个字：在线可用');
             t.hide();
@@ -2422,7 +2460,7 @@ class WMSettingTab extends PluginSettingTab {
           onClick: async () => {
             const added = this.parseAccounts(this.accountsDraft);
             if (!added.length) {
-              new Notice('没识别到 bookId（需要 MP_WXS_ 开头）');
+              new Notice('没识别到 bookid（需要 mp_wxs_ 开头）');
               return;
             }
             for (const a of added) {
@@ -2432,7 +2470,7 @@ class WMSettingTab extends PluginSettingTab {
             }
             await this.plugin.saveAll();
             this.accountsDraft = '';
-            this.display();
+            this.refreshUI();
           },
         },
       },
@@ -2547,7 +2585,7 @@ class WMSettingTab extends PluginSettingTab {
         if (preset?.baseUrl) llm.baseUrl = preset.baseUrl;
         if (preset?.model) llm.model = preset.model;
         await this.plugin.saveAll();
-        this.display();
+        this.refreshUI();
       },
     );
 
@@ -2671,7 +2709,7 @@ class WMSettingTab extends PluginSettingTab {
           this.plugin.state.processed = {};
           await this.plugin.saveAll();
           new Notice('已清空（不会删除已有笔记，但会重复抓取）');
-          this.display();
+          this.refreshUI();
         },
       },
     ]);
@@ -2768,7 +2806,8 @@ class WMSettingTab extends PluginSettingTab {
     const sw = ctrl.createDiv({ cls: `wmc-fr-switch${value ? ' is-on' : ''}` });
     sw.setAttribute('role', 'switch');
     sw.setAttribute('aria-checked', String(value));
-    sw.setAttribute('aria-label', label);
+    // 用 visually-hidden 文本给出可读名，避免 Obsidian 把 aria-label 映射成 hover 气泡
+    sw.createSpan({ cls: 'wmc-sr', text: label });
     sw.tabIndex = 0;
     const flip = () => {
       const next = !sw.hasClass('is-on');
@@ -2929,23 +2968,16 @@ class WMSettingTab extends PluginSettingTab {
       let i = 0;
       const chunk = 100;
       const step = () => {
-        const frag = document.createDocumentFragment();
+        const frag = createFragment();
         for (const a of items.slice(i, i + chunk)) {
-          const label = document.createElement('label');
-          label.className = 'wmc-pick-row';
-          const cb = document.createElement('input');
-          cb.type = 'checkbox';
+          const label = createEl('label', { cls: 'wmc-pick-row' });
+          const cb = label.createEl('input', { cls: 'wmc-pick-cb', attr: { type: 'checkbox' } });
           cb.checked = picked.has(a.bookId);
           cb.addEventListener('change', () => void toggle(a, cb.checked));
-          const nm = document.createElement('span');
-          nm.className = 'wmc-pick-name';
+          const nm = label.createSpan({ cls: 'wmc-pick-name' });
           nm.textContent = a.name;
-          const id = document.createElement('span');
-          id.className = 'wmc-pick-id';
+          const id = label.createSpan({ cls: 'wmc-pick-id' });
           id.textContent = a.bookId.replace('MP_WXS_', '#');
-          label.appendChild(cb);
-          label.appendChild(nm);
-          label.appendChild(id);
           frag.appendChild(label);
         }
         i += chunk;

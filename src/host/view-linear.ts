@@ -118,6 +118,8 @@ export class WmcView extends ItemView {
     });
     this.contentEl.empty();
     this.contentEl.addClass('wmc-root');
+    // 面板开合用状态类表达（替代 CSS :has()，避免大范围选择器失效计算）
+    this.contentEl.toggleClass('is-panel-open', this.panelOpen);
     this.applyTheme();
     this.render();
     this.registerDomEvent(this.contentEl, 'keydown', (ev) => this.onKey(ev));
@@ -139,7 +141,7 @@ export class WmcView extends ItemView {
   }
 
   private get layout(): Layout {
-    return (this.plugin.settings.layout || 'card') as Layout;
+    return (this.plugin.settings.layout || 'card');
   }
 
   /* ------------------------------- 数据 ------------------------------- */
@@ -226,6 +228,7 @@ export class WmcView extends ItemView {
   /* ------------------------------- 渲染 ------------------------------- */
 
   render(): void {
+    this.contentEl.toggleClass('is-panel-open', this.panelOpen);
     const root = this.contentEl;
     root.empty();
     this.applyTheme();
@@ -257,7 +260,7 @@ export class WmcView extends ItemView {
       cls: 'wmc-pickbar-btn',
       text: this.selectedIds.size ? `下载所选 ${this.selectedIds.size} 篇` : '下载所选',
     });
-    (pickBtn as HTMLButtonElement).disabled = this.selectedIds.size === 0;
+    pickBtn.disabled = this.selectedIds.size === 0;
     pickBtn.addEventListener('click', () => void this.downloadSelected());
     pickBar.createSpan({
       cls: 'wmc-pickbar-count',
@@ -279,6 +282,10 @@ export class WmcView extends ItemView {
       this.panelOpen = !this.panelOpen;
       this.render();
     });
+    // 已登录才显示：一键清空登录态，方便干净重扫（切号救急入口）
+    if (this.plugin.loginState() !== 'none') {
+      this.iconBtn(bar, 'log-out', '退出登录（清空后重新扫码）', () => void this.plugin.logoutAccount());
+    }
 
     const grabBtn = this.iconBtn(bar, 'refresh-cw', '抓取一轮', () => {
       void (async () => {
@@ -452,8 +459,8 @@ export class WmcView extends ItemView {
     if (!bar) return;
     const s = this.plugin.getWatchStatus();
     const dot = bar.querySelector('.wmc-watch-dot');
-    const text = bar.querySelector('.wmc-watch-text') as HTMLElement | null;
-    const fill = bar.querySelector('.wmc-progress-fill') as HTMLElement | null;
+    const text = bar.querySelector<HTMLElement>('.wmc-watch-text');
+    const fill = bar.querySelector<HTMLElement>('.wmc-progress-fill');
     if (!dot || !text || !fill) return;
 
     let mode: 'busy' | 'idle' | 'error' | 'off' = 'off';
@@ -556,7 +563,7 @@ export class WmcView extends ItemView {
   }
 
   private refreshPanelList(): void {
-    const list = this.contentEl.querySelector('.wmc-panel-list') as HTMLElement | null;
+    const list = this.contentEl.querySelector<HTMLElement>('.wmc-panel-list');
     if (list) this.renderPanelList(list);
   }
 
@@ -701,7 +708,7 @@ export class WmcView extends ItemView {
       let i = 0;
       const chunk = this.layout === 'compact' || this.layout === 'official' ? 120 : 60;
       const step = () => {
-        const frag = document.createDocumentFragment();
+        const frag = createFragment();
         for (const r of items.slice(i, i + chunk)) frag.appendChild(this.item(r));
         i += chunk;
         box.appendChild(frag);
@@ -741,7 +748,7 @@ export class WmcView extends ItemView {
     if (!loggedIn) {
       wrap.createDiv({ cls: 'wmc-hero-title', text: '把公众号新文章自动存进 Obsidian' });
       wrap.createDiv({ cls: 'wmc-hero-sub', text: '扫码登录微信读书就能开始，不用复制任何东西' });
-      this.heroBtn(wrap, '① 扫码登录', true, () => this.plugin.startQrLogin());
+      this.heroBtn(wrap, '① 扫码登录', true, () => void this.plugin.startQrLogin());
       return;
     }
     if (!hasAccounts) {
@@ -829,7 +836,7 @@ export class WmcView extends ItemView {
       cls: `wmc-hero-btn${this.agentBusy ? '' : ' is-primary'}`,
       text: this.agentBusy ? '运行中…' : '发送',
     });
-    (send as HTMLButtonElement).disabled = this.agentBusy;
+    send.disabled = this.agentBusy;
     send.addEventListener('click', () => void this.runAgentPrompt(ta.value, out));
     ta.addEventListener('keydown', (ev) => {
       if ((ev.metaKey || ev.ctrlKey) && ev.key === 'Enter') void this.runAgentPrompt(ta.value, out);
@@ -852,7 +859,7 @@ export class WmcView extends ItemView {
         const tail = (r.err || '').split('\n').filter(Boolean).slice(-3).join('\n');
         this.agentOut += `\n\n[退出码 ${r.code}]${tail ? `\n${tail}` : ''}`;
       } else if (!this.agentOut.trim()) {
-        this.agentOut = '（Agent 没有返回内容）';
+        this.agentOut = '（agent 没有返回内容）';
       }
       out.setText(this.agentOut);
     } catch (e) {
@@ -860,7 +867,7 @@ export class WmcView extends ItemView {
       out.setText(this.agentOut);
     }
     this.agentBusy = false;
-    const send = this.contentEl.querySelector('.wmc-agent-input button') as HTMLButtonElement | null;
+    const send = this.contentEl.querySelector<HTMLButtonElement>('.wmc-agent-input button');
     if (send) {
       send.disabled = false;
       send.setText('发送');
@@ -877,7 +884,8 @@ export class WmcView extends ItemView {
     setIcon(syncBtn, 'refresh-cw');
     syncBtn.setAttr('title', '同步最新（只拉新文章，不动已存历史）');
     // LoadingOrb：Claude Code 用的字符轮转，5 帧叠在同一位置只切透明度，字符不抖动
-    syncBtn.addEventListener('click', async () => {
+    syncBtn.addEventListener('click', () => {
+      void (async () => {
       if (!this.account) {
         new Notice('先在左栏选一个公众号');
         return;
@@ -891,6 +899,7 @@ export class WmcView extends ItemView {
       syncBtn.setAttr('title', '同步最新（只拉新文章，不动已存历史）');
       new Notice(n > 0 ? `「${this.account}」新增 ${n} 篇` : '没有新文章');
       if (n > 0) this.renderList();
+        })();
     });
 
     const add = top.createEl('button', { cls: 'wmc-icon-btn' });
@@ -916,7 +925,7 @@ export class WmcView extends ItemView {
   }
 
   private renderSideList(list?: HTMLElement | null): void {
-    const el = list || (this.contentEl.querySelector('.wmc-side-list') as HTMLElement | null);
+    const el = list || (this.contentEl.querySelector<HTMLElement>('.wmc-side-list'));
     if (!el) return;
     el.empty();
 
@@ -1011,7 +1020,7 @@ export class WmcView extends ItemView {
   }
 
   private updatePickBar(): void {
-    const btn = this.contentEl.querySelector('.wmc-pickbar-btn') as HTMLButtonElement | null;
+    const btn = this.contentEl.querySelector<HTMLButtonElement>('.wmc-pickbar-btn');
     const cnt = this.contentEl.querySelector('.wmc-pickbar-count');
     const n = this.selectedIds.size;
     if (btn) {
@@ -1056,7 +1065,7 @@ export class WmcView extends ItemView {
   }
 
   private card(r: RowItem): HTMLElement {
-    const card = createEl('div', { cls: 'wmc-card' });
+    const card = createDiv({ cls: 'wmc-card' });
     if (r.read) card.addClass('is-read');
     const cover = card.createDiv('wmc-card-cover');
     const src = this.coverSrc(r);
@@ -1083,7 +1092,7 @@ export class WmcView extends ItemView {
 
   private feedItem(r: RowItem): HTMLElement {
     const src = this.coverSrc(r);
-    const el = createEl('div', { cls: `wmc-feed-item${src ? ' has-img' : ''}${r.read ? ' is-read' : ''}` });
+    const el = createDiv({ cls: `wmc-feed-item${src ? ' has-img' : ''}${r.read ? ' is-read' : ''}` });
     if (src) {
       const img = el.createEl('img', { cls: 'wmc-feed-img' });
       img.src = src;
@@ -1103,7 +1112,7 @@ export class WmcView extends ItemView {
   }
 
   private officialRow(r: RowItem): HTMLElement {
-    const row = createEl('div', { cls: `wmc-off-row${r.read ? ' is-read' : ''}` });
+    const row = createDiv({ cls: `wmc-off-row${r.read ? ' is-read' : ''}` });
     const thumb = row.createDiv('wmc-off-thumb');
     const src = this.coverSrc(r);
     if (src) {
@@ -1128,7 +1137,7 @@ export class WmcView extends ItemView {
   }
 
   private compactRow(r: RowItem): HTMLElement {
-    const row = createEl('div', { cls: `wmc-cmp-row${r.read ? ' is-read' : ''}` });
+    const row = createDiv({ cls: `wmc-cmp-row${r.read ? ' is-read' : ''}` });
     const dot = row.createDiv('wmc-cmp-dot');
     setIcon(dot, r.read ? 'circle-check' : 'circle');
     const main = row.createDiv('wmc-cmp-main');
@@ -1223,7 +1232,8 @@ export class WmcView extends ItemView {
     }
     body.createDiv('wmc-hint').setText('这篇还没归档。');
     const btn = body.createEl('button', { cls: 'wmc-text-btn is-primary', text: '抓取并归档' });
-    btn.addEventListener('click', async () => {
+    btn.addEventListener('click', () => {
+      void (async () => {
       btn.disabled = true;
       btn.setText('抓取中…');
       const ok = await this.plugin.archiveSingle(r.reviewId, r.account);
@@ -1237,6 +1247,7 @@ export class WmcView extends ItemView {
       } else {
         btn.setText('失败，重试');
       }
+        })();
     });
   }
 
@@ -1275,7 +1286,7 @@ export class WmcView extends ItemView {
     ];
 
     const out = body.createDiv('wmc-ai-out');
-    out.setText('选一个动作开始。Agent 会读这篇文章的正文，输出会实时显示在这里。');
+    out.setText('选一个动作开始。agent 会读这篇文章的正文，输出会实时显示在这里。');
 
     const inputRow = body.createDiv('wmc-ai-input');
     const ta = inputRow.createEl('textarea', {
@@ -1312,7 +1323,7 @@ export class WmcView extends ItemView {
         if (res.code !== 0) {
           out.setText(`${acc}\n\n[退出码 ${res.code}] ${(res.err || '').split('\n').slice(-3).join('\n')}`);
         } else if (!acc.trim()) {
-          out.setText('（Agent 没有返回内容）');
+          out.setText('（agent 没有返回内容）');
         }
       } catch (e) {
         out.setText(`出错：${e instanceof Error ? e.message : String(e)}`);
@@ -1320,11 +1331,13 @@ export class WmcView extends ItemView {
       this.agentBusy = false;
       if (acc.trim() && r.path) {
         const write = body.createEl('button', { cls: 'wmc-text-btn', text: '写入这篇笔记' });
-        write.addEventListener('click', async () => {
+        write.addEventListener('click', () => {
+          void (async () => {
           await this.plugin.appendToNote(r.path!, `\n\n## AI 处理 · ${new Date().toLocaleString('zh-CN')}\n\n${acc.trim()}\n`);
           new Notice('已写入笔记');
           write.setText('已写入');
-          (write as HTMLButtonElement).disabled = true;
+          write.disabled = true;
+            })();
         });
       }
     };
@@ -1413,7 +1426,7 @@ export class WmcView extends ItemView {
       }
     } else if (ev.key === '/') {
       ev.preventDefault();
-      (this.contentEl.querySelector('.wmc-searchbox input') as HTMLInputElement | null)?.focus();
+      (this.contentEl.querySelector<HTMLInputElement>('.wmc-searchbox input'))?.focus();
     }
   }
 }

@@ -1,6 +1,6 @@
 {
   "name": "zisuzi-weread-mp",
-  "version": "4.4.0",
+  "version": "4.4.1",
   "description": "Archive WeChat Official Account articles from your WeRead shelf as local Markdown notes.",
   "main": "main.js",
   "type": "module",
@@ -31,6 +31,7 @@
     "@types/node": "^22.15.17",
     "esbuild": "0.25.5",
     "eslint": "^9.39.4",
+    "eslint-plugin-obsidianmd": "^0.4.2",
     "obsidian": "latest",
     "typescript": "^5.8.3",
     "typescript-eslint": "^8.71.2"

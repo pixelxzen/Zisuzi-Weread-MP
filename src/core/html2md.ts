@@ -255,7 +255,7 @@ export function replaceMediaPlaceholders(
 /** 由标题生成安全文件名 */
 export function safeFileName(title: string, max = 80): string {
   const cleaned = title
-    .replace(/[\\/:*?"<>|#^\[\]]/g, ' ')
+    .replace(/[\\/:*?"<>|#^[\]]/g, ' ')
     .replace(/\s+/g, ' ')
     .trim();
   return (cleaned || '未命名').slice(0, max);

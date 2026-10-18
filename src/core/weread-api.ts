@@ -42,7 +42,7 @@ export class WereadAgentApi {
     return /^wrk-/.test(this.apiKey);
   }
 
-  async gateway<T = any>(apiName: string, params: Record<string, unknown> = {}): Promise<T> {
+  async gateway<T = unknown>(apiName: string, params: Record<string, unknown> = {}): Promise<T> {
     if (!this.hasKey) throw new AgentApiError(-1, '未配置官方 API Key');
     const body = JSON.stringify({ api_name: apiName, skill_version: SKILL_VERSION, ...params });
     const resp = await this.http(
@@ -66,7 +66,7 @@ export class WereadAgentApi {
   }
 
   /** 完整书架（含书 / 有声书 / 文章收藏） */
-  async shelfSync(): Promise<{ books: ShelfBook[]; albums: any[]; mp?: any }> {
+  async shelfSync(): Promise<{ books: ShelfBook[]; albums: unknown[]; mp?: unknown }> {
     const r = await this.gateway<Record<string, unknown>>('/shelf/sync');
     return {
       books: (Array.isArray(r.books) ? r.books : []) as ShelfBook[],
@@ -84,18 +84,20 @@ export class WereadAgentApi {
   }
 
   /** 笔记本概览（有笔记的书） */
-  async notebooks(count = 20, lastSort?: number): Promise<any> {
-    return this.gateway('/user/notebooks', lastSort ? { count, lastSort } : { count });
+  async notebooks(count = 20, lastSort?: number): Promise<Record<string, unknown>> {
+    return this.gateway<Record<string, unknown>>('/user/notebooks', lastSort ? { count, lastSort } : { count });
   }
 
   /** 阅读统计 */
-  async readData(mode: 'weekly' | 'monthly' | 'annually' | 'overall' = 'monthly'): Promise<any> {
-    return this.gateway('/readdata/detail', { mode });
+  async readData(
+    mode: 'weekly' | 'monthly' | 'annually' | 'overall' = 'monthly',
+  ): Promise<Record<string, unknown>> {
+    return this.gateway<Record<string, unknown>>('/readdata/detail', { mode });
   }
 
   /** 书城搜索（scope: 0 全部 / 10 电子书 / 14 有声书 / 6 作者 / 12 全文 / 13 书单） */
-  async search(keyword: string, scope = 0, count = 10): Promise<any> {
-    return this.gateway('/store/search', { keyword, scope, count });
+  async search(keyword: string, scope = 0, count = 10): Promise<Record<string, unknown>> {
+    return this.gateway<Record<string, unknown>>('/store/search', { keyword, scope, count });
   }
 }
 

@@ -98,9 +98,16 @@ export interface WebviewElement extends HTMLElement {
   addEventListener(type: string, cb: (ev: Event) => void): void;
 }
 
+declare global {
+  // Electron 的 <webview> 标签不在标准 DOM 类型表里；声明进来后就能用 Obsidian 的 createEl 创建
+  interface HTMLElementTagNameMap {
+    webview: WebviewElement;
+  }
+}
+
 /** 创建 <webview>；浏览器端（无 webviewTag）会抛错，调用方自行兜底 */
 export function createWebviewElement(): WebviewElement {
-  return document.createElement('webview') as unknown as WebviewElement;
+  return createEl('webview');
 }
 
 /* ------------------------------ Obsidian adapter ----------------------------- */
@@ -109,7 +116,9 @@ export function createWebviewElement(): WebviewElement {
 export function vaultBasePath(adapter: unknown): string | undefined {
   if (!adapter || typeof adapter !== 'object') return undefined;
   const fn = (adapter as { getBasePath?: unknown }).getBasePath;
-  return typeof fn === 'function' ? (fn as () => string).call(adapter) : undefined;
+  if (typeof fn !== 'function') return undefined;
+  const out: unknown = (fn as (...args: unknown[]) => unknown).call(adapter);
+  return typeof out === 'string' ? out : undefined;
 }
 
 /* ----------------------------------- CDP ----------------------------------- */

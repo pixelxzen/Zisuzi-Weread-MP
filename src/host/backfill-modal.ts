@@ -108,7 +108,7 @@ export class BackfillModal extends Modal {
     const dInput = dateVal.createEl('input', {
       cls: 'wmc-bf-input is-date',
       type: 'text',
-      attr: { placeholder: 'YYYY-MM-DD，可留空' },
+      attr: { placeholder: '日期（如 2026-01-31），可留空' },
     });
     dInput.addEventListener('change', () => {
       const v = dInput.value.trim();
@@ -291,7 +291,7 @@ export class BackfillModal extends Modal {
     if (res.error) new Notice(res.error, 12000);
 
     if (res.failed > 0) {
-      const foot = this.contentEl.querySelector('.wmc-bf-foot') as HTMLElement | null;
+      const foot = this.contentEl.querySelector<HTMLElement>('.wmc-bf-foot');
       if (foot && !foot.querySelector('.wmc-bf-retry')) {
         const b = foot.createEl('button', {
           cls: 'wmc-bf-btn is-warn wmc-bf-retry',
@@ -418,9 +418,9 @@ export class BackfillModal extends Modal {
       if (this.rowSig.get(it.reviewId) === sig) continue;
       const row = this.rowEls.get(it.reviewId);
       if (!row) continue;
-      const ico = row.querySelector('.wmc-bf-ico') as HTMLElement | null;
-      const time = row.querySelector('.wmc-bf-time') as HTMLElement | null;
-      const tag = row.querySelector('.wmc-bf-tag') as HTMLElement | null;
+      const ico = row.querySelector<HTMLElement>('.wmc-bf-ico');
+      const time = row.querySelector<HTMLElement>('.wmc-bf-time');
+      const tag = row.querySelector<HTMLElement>('.wmc-bf-tag');
       if (!ico || !time || !tag) continue;
       this.paintRow(it, row, ico, time, tag);
       if (it.state === 'running') movedTo = row;

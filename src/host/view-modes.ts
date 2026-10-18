@@ -79,7 +79,7 @@ export class WmcView extends ItemView {
   }
 
   private get layout(): Layout {
-    return (this.plugin.settings.layout || 'card') as Layout;
+    return (this.plugin.settings.layout || 'card');
   }
 
   /* ------------------------------- 数据 ------------------------------- */
@@ -241,7 +241,7 @@ export class WmcView extends ItemView {
   }
 
   private toggleSearch(bar: HTMLElement): void {
-    const exist = bar.querySelector('.wmc-search') as HTMLElement | null;
+    const exist = bar.querySelector<HTMLElement>('.wmc-search');
     if (exist) {
       exist.remove();
       this.query = '';
@@ -310,7 +310,7 @@ export class WmcView extends ItemView {
     let i = 0;
     const chunk = this.layout === 'compact' || this.layout === 'official' ? 120 : 60;
     const step = () => {
-      const frag = document.createDocumentFragment();
+      const frag = createFragment();
       for (const r of rows.slice(i, i + chunk)) frag.appendChild(this.item(r));
       i += chunk;
       box.appendChild(frag);
@@ -338,7 +338,7 @@ export class WmcView extends ItemView {
   }
 
   private card(r: RowItem): HTMLElement {
-    const card = createEl('div', { cls: 'wmc-card' });
+    const card = createDiv({ cls: 'wmc-card' });
     if (r.read) card.addClass('is-read');
     const cover = card.createDiv('wmc-card-cover');
     if (r.picUrl) {
@@ -363,7 +363,7 @@ export class WmcView extends ItemView {
 
   /** 信息流 / 瀑布：有图的大图块，无图的压缩文字块（适配小绿书 vs 长图文） */
   private feedItem(r: RowItem): HTMLElement {
-    const el = createEl('div', { cls: `wmc-feed-item${r.picUrl ? ' has-img' : ''}${r.read ? ' is-read' : ''}` });
+    const el = createDiv({ cls: `wmc-feed-item${r.picUrl ? ' has-img' : ''}${r.read ? ' is-read' : ''}` });
     if (r.picUrl) {
       const img = el.createEl('img', { cls: 'wmc-feed-img' });
       img.src = r.picUrl;
@@ -384,7 +384,7 @@ export class WmcView extends ItemView {
 
   /** 公众号官方列表：左缩略图 + 右标题/摘要/元信息 */
   private officialRow(r: RowItem): HTMLElement {
-    const row = createEl('div', { cls: `wmc-off-row${r.read ? ' is-read' : ''}` });
+    const row = createDiv({ cls: `wmc-off-row${r.read ? ' is-read' : ''}` });
     const thumb = row.createDiv('wmc-off-thumb');
     if (r.picUrl) {
       const img = thumb.createEl('img');
@@ -409,7 +409,7 @@ export class WmcView extends ItemView {
 
   /** 纯标题 + 一行简介（最高密度） */
   private compactRow(r: RowItem): HTMLElement {
-    const row = createEl('div', { cls: `wmc-cmp-row${r.read ? ' is-read' : ''}` });
+    const row = createDiv({ cls: `wmc-cmp-row${r.read ? ' is-read' : ''}` });
     const dot = row.createDiv('wmc-cmp-dot');
     setIcon(dot, r.read ? 'circle-check' : 'circle');
     const main = row.createDiv('wmc-cmp-main');
@@ -495,7 +495,8 @@ export class WmcView extends ItemView {
     }
     body.createDiv('wmc-hint').setText('这篇还没归档。');
     const btn = body.createEl('button', { cls: 'wmc-text-btn is-primary', text: '抓取并归档' });
-    btn.addEventListener('click', async () => {
+    btn.addEventListener('click', () => {
+      void (async () => {
       btn.disabled = true;
       btn.setText('抓取中…');
       const ok = await this.plugin.archiveSingle(r.reviewId, r.account);
@@ -509,6 +510,7 @@ export class WmcView extends ItemView {
       } else {
         btn.setText('失败，重试');
       }
+        })();
     });
   }
 
@@ -589,7 +591,7 @@ export class WmcView extends ItemView {
       }
     } else if (ev.key === '/') {
       ev.preventDefault();
-      const bar = this.contentEl.querySelector('.wmc-toolbar') as HTMLElement | null;
+      const bar = this.contentEl.querySelector<HTMLElement>('.wmc-toolbar');
       if (bar) this.toggleSearch(bar);
     }
   }

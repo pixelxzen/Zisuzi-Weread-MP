@@ -155,7 +155,7 @@ export class WmcView extends ItemView {
   }
 
   private toggleSearch(bar: HTMLElement): void {
-    const exist = bar.querySelector('.wmc-search') as HTMLElement | null;
+    const exist = bar.querySelector<HTMLElement>('.wmc-search');
     if (exist) {
       exist.remove();
       this.query = '';
@@ -219,7 +219,7 @@ export class WmcView extends ItemView {
     const grid = root.createDiv('wmc-grid');
     let i = 0;
     const step = () => {
-      const frag = document.createDocumentFragment();
+      const frag = createFragment();
       for (const r of rows.slice(i, i + 60)) frag.appendChild(this.card(r));
       i += 60;
       grid.appendChild(frag);
@@ -229,7 +229,7 @@ export class WmcView extends ItemView {
   }
 
   private card(r: RowItem): HTMLElement {
-    const card = createEl('div', { cls: 'wmc-card' });
+    const card = createDiv({ cls: 'wmc-card' });
     if (r.read) card.addClass('is-read');
     const cover = card.createDiv('wmc-card-cover');
     if (r.picUrl) {
@@ -339,7 +339,8 @@ export class WmcView extends ItemView {
     }
     body.createDiv('wmc-hint').setText('这篇还没归档。');
     const btn = body.createEl('button', { cls: 'wmc-text-btn is-primary', text: '抓取并归档' });
-    btn.addEventListener('click', async () => {
+    btn.addEventListener('click', () => {
+      void (async () => {
       btn.disabled = true;
       btn.setText('抓取中…');
       const ok = await this.plugin.archiveSingle(r.reviewId, r.account);
@@ -353,6 +354,7 @@ export class WmcView extends ItemView {
       } else {
         btn.setText('失败，重试');
       }
+        })();
     });
   }
 
@@ -433,7 +435,7 @@ export class WmcView extends ItemView {
       }
     } else if (ev.key === '/') {
       ev.preventDefault();
-      const bar = this.contentEl.querySelector('.wmc-toolbar') as HTMLElement | null;
+      const bar = this.contentEl.querySelector<HTMLElement>('.wmc-toolbar');
       if (bar) this.toggleSearch(bar);
     }
   }
