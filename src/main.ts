@@ -1073,7 +1073,8 @@ export default class WereadMpCatcher extends Plugin {
     const frameHost = box.createDiv('wmc-login-frame-host');
     const diag = box.createDiv({ cls: 'wmc-login-diag' });
     const manual = box.createEl('button', { cls: 'wmc-hero-btn', text: '我已经扫码了，立即同步' });
-    const actions = box.createDiv('wmc-login-actions is-off');
+    const actions = box.createDiv('wmc-login-actions');
+    const qrBtn = actions.createEl('button', { cls: 'wmc-login-link', text: '没看到二维码？点这里' });
     const reloadBtn = actions.createEl('button', { cls: 'wmc-login-link', text: '重新加载窗口' });
     const browserBtn = actions.createEl('button', { cls: 'wmc-login-link', text: '在浏览器里打开' });
 
@@ -1093,6 +1094,30 @@ export default class WereadMpCatcher extends Plugin {
 
     this.loginPolling = true;
     modal.open(); // 顺序关键：先把 modal 挂进文档，再把 webview 挂进已挂载的 DOM
+
+    /**
+     * 微信读书首页默认只渲染书架/热搜，二维码藏在「登录」入口后面（.login_qrcode_container）。
+     * 不点开它，用户就会对着一个没有码的首页发呆 —— 2026-10-19 的真实反馈即此。
+     * 已经在登录态时这里直接返回 'qr'，不会重复点。
+     */
+    async function openLoginPanel(): Promise<boolean> {
+      if (!wv) return false;
+      try {
+        const r = await wv.executeJavaScript(`(() => {
+          if (document.querySelector('.login_qrcode_container')) return 'qr';
+          const nodes = Array.from(document.querySelectorAll('a,button,div,span'));
+          const hit = nodes.find((el) => {
+            const t = (el.textContent || '').trim();
+            return (t === '登录' || t === '立即登录' || t === '登录/注册') && el.offsetParent;
+          });
+          if (hit) { hit.click(); return 'clicked'; }
+          return 'none';
+        })()`);
+        return r === 'qr' || r === 'clicked';
+      } catch {
+        return false;
+      }
+    }
 
     function attach(): void {
       try {
@@ -1127,6 +1152,11 @@ export default class WereadMpCatcher extends Plugin {
             baseline = typeof raw === 'string' ? normalizeCookie(raw) : '';
           } catch {
             baseline = '';
+          }
+          // 首页不会自己弹二维码：cookie 不全时先把登录面板点开
+          if (!checkCookie(normalizeCookie(baseline)).ok) {
+            const ok = await openLoginPanel();
+            status.setText(ok ? '等待扫码…（二维码在窗口里）' : '等待扫码…（没找到登录入口，可点下方「重新加载窗口」）');
           }
           // 旧登录态若本来就在、且服务端仍认，直接收工；认不了就留在原地等用户重扫
           await finish();
@@ -1237,6 +1267,14 @@ export default class WereadMpCatcher extends Plugin {
       }
     });
 
+    qrBtn.addEventListener('click', () => {
+      void (async () => {
+        status.setText('正在打开登录二维码…');
+        const ok = await openLoginPanel();
+        status.setText(ok ? '二维码已打开，用微信扫一下' : '页面里没找到登录入口，点「重新加载窗口」再试');
+      })();
+    });
+
     browserBtn.addEventListener('click', () => {
       window.open('https://weread.qq.com/', '_blank');
       new Notice('已在浏览器打开：扫码登录后，把浏览器里的 Cookie 粘贴到插件设置即可完成登录', 12000);
@@ -1267,6 +1305,7 @@ export default class WereadMpCatcher extends Plugin {
         await sleep(1800);
         tries++;
         if (finished) return;
+        if (tries <= 8 && tries % 2 === 0 && ready) void openLoginPanel();
         if (tries % 3 === 0 && ready) status.setText(`等待扫码…（已检测 ${tries} 次，登录后会自动关闭）`);
         if (await finish()) return;
       }
