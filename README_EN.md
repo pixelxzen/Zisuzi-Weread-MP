@@ -113,6 +113,25 @@ Press **Fetch once** to test, or enable **auto-collect** and let it poll.
 
 > The first shelf sync takes a few seconds up to half a minute depending on how many accounts you follow.
 
+## Reading the login indicator
+
+The dot on the login card in settings answers exactly one question: **does the web session actually work right now, as measured against the real API?**
+
+| Colour | Meaning | What to do |
+| --- | --- | --- |
+| 🟢 Green | The list endpoint responded — fetching works | Nothing |
+| 🟡 Amber | The login is valid, but the Official Account endpoint is rate-limiting this account (`-2041`) | **Do not re-scan** — it will not help. Wait out the cooldown, or use another account |
+| 🔴 Red | The web session is gone (missing or expired cookies, usually `-2012`) | Click "Scan QR code" again |
+| ⚪ Grey | Never measured | Opening settings runs a probe automatically; "Test list" works too |
+
+Three layers, none of which replaces another:
+
+| Layer | What it controls | How it fails |
+| --- | --- | --- |
+| Official key (`wrk-…`) | Reading your shelf and book metadata | Key missing — re-scan to exchange a new one |
+| Web session (`wr_vid` / `wr_skey` / `wr_rt` / `wr_gid`) | Article lists, bodies, images, audio and video | Turns red — re-scan |
+| The account itself | Whether the server is rate-limiting it | Turns amber — re-scanning does nothing |
+
 ## Fetch cadence: why it is not "fast"
 
 The Official Account endpoints are WeRead's private APIs. Hammering them triggers rate controls. The defaults below were validated on real accounts:
