@@ -57,3 +57,29 @@ modal.open();                                        // ← 之后才挂进 DOM
 - 若宿主环境**根本没有 webviewTag**，「在浏览器里打开 + 粘贴 Cookie」是唯一的可用路径（已在弹窗里显式给出）。
 - 内嵌窗口里扫码仍受微信读书既有风控，与本次改动无关。
 - 本次未改抓取 / 解析 / 存储链路。
+
+## 补记（同日 22:40 真机复测）：二维码能弹了，但登录态仍然进不来
+
+现象：弹窗里完成登录、点「我已经扫码了，立即同步」，状态行仍是「还缺 wr_vid、wr_skey、wr_rt」。
+
+根因（不是检测慢，是通道取不到）：
+
+```bash
+/usr/bin/sqlite3 -readonly ~/Library/Application\ Support/obsidian/Cookies \
+  "SELECT name, is_httponly, length(value) FROM cookies WHERE host_key='.weread.qq.com';"
+# wr_vid    http_only=1  value_len=7
+# wr_skey   http_only=1  value_len=8
+# wr_rt     http_only=1  value_len=28
+# wr_gid    不在库里（页面 JS 写入，非 HttpOnly）
+```
+
+`wr_vid` / `wr_skey` / `wr_rt` 是 **HttpOnly**，`document.cookie` 永远看不到——所以原实现
+（只靠 `executeJavaScript('document.cookie')`）从根上不可能拿到完整登录态。这也解释了为什么
+文档里「扫码后自动写入」在某些机器上从来没真正成功过，只是有人手贴过 cookie 才看起来能跑。
+
+解法：`readCookiesFromStore()` —— 复制 `Cookies`（连同 `-wal`）到临时文件，用
+`/usr/bin/sqlite3 -readonly` 查 weread 域的登录字段（Obsidian 该库 `value` 列是**明文**，
+不需要解密），查完删临时副本；再与 `document.cookie` 按 key 合并（页面里的 `wr_gid` 补进来），
+四字段齐全才走 `verifyCookieLive()`。实测查询 5ms。
+
+边界：Windows 上该库若为 DPAPI 加密且无 sqlite3 CLI，读不到 → 退回「手动粘贴 Cookie」。
