@@ -95,6 +95,11 @@ export interface WMSettings {
   webLoginOk?: boolean;
   webLoginAt?: number;
   webLoginMsg?: string;
+  /**
+   * 最近一次实测的结论。webLoginOk 只有 true/false，会把「账号被 -2041 限流」和
+   * 「cookie 真过期」压成同一种失败 —— 前者扫码没用、后者必须重扫，界面上必须分开。
+   */
+  webLoginVerdict?: 'ok' | 'restricted' | 'expired' | 'unknown';
   outputDir: string;
   listWidth: number;
   llm: LLMSettings;
@@ -998,6 +1003,7 @@ export default class WereadMpCatcher extends Plugin {
     this.settings.loginProfile = undefined;
     // 网页登录态是上一次实测结果，登出后必须回到「未检测」，否则界面还显示正常
     this.settings.webLoginOk = undefined;
+    this.settings.webLoginVerdict = undefined;
     this.settings.webLoginAt = undefined;
     this.settings.webLoginMsg = '';
     // 切换账号必须清掉旧账号的书架/勾选/文章索引，否则两个账号数据混在一个视图里
@@ -1346,6 +1352,7 @@ export default class WereadMpCatcher extends Plugin {
       const items = await client.listArticles(acc.bookId, 0);
       const ok = items.length > 0;
       this.settings.webLoginOk = ok;
+      this.settings.webLoginVerdict = ok ? 'ok' : 'unknown';
       this.settings.webLoginAt = Date.now();
       this.settings.webLoginMsg = ok ? `列表正常（${items.length} 条）` : '列表返回空';
       await this.saveAll();
@@ -1353,6 +1360,8 @@ export default class WereadMpCatcher extends Plugin {
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       this.settings.webLoginOk = false;
+      // -2041 = 账号级限流：登录本身有效，扫码救不了
+      this.settings.webLoginVerdict = /-?2041/.test(msg) ? 'restricted' : 'expired';
       this.settings.webLoginAt = Date.now();
       this.settings.webLoginMsg = msg;
       await this.saveAll();
@@ -1362,10 +1371,28 @@ export default class WereadMpCatcher extends Plugin {
 
   /** 网页登录态的一行摘要（给设置页/状态条用） */
   webLoginSummary(): string {
-    if (this.settings.webLoginOk === undefined) return '未检测';
+    if (this.settings.webLoginOk === undefined) return '未检测（打开设置页会自动测一次）';
     const mins = this.settings.webLoginAt ? Math.round((Date.now() - this.settings.webLoginAt) / 60000) : 0;
     if (this.settings.webLoginOk) return `正常（${mins} 分钟前检测）`;
+    if (this.settings.webLoginVerdict === 'restricted') {
+      return `受限：账号级限流（-2041），登录本身有效，扫码不会改善 —— 等冷却或换账号`;
+    }
+    if (this.settings.webLoginVerdict === 'unknown') {
+      return `没法确认：${(this.settings.webLoginMsg || '接口无响应').slice(0, 34)}`;
+    }
     return `已失效：${(this.settings.webLoginMsg || '').slice(0, 40)}`;
+  }
+
+  /**
+   * 状态点的语义：绿点只代表「实测可用」，不再代表「凭据写全了」。
+   * 未实测 / 限流 / 失效 各给一色，避免「绿点 + 未检测」这种自相矛盾。
+   */
+  loginDotState(): 'full' | 'restricted' | 'bad' | 'unknown' | 'none' {
+    if (this.loginState() === 'none') return 'none';
+    if (this.settings.webLoginOk === true) return 'full';
+    if (this.settings.webLoginVerdict === 'restricted') return 'restricted';
+    if (this.settings.webLoginOk === false) return 'bad';
+    return 'unknown';
   }
 
   /** 是否具备可用登录态：session 模式，或手动 Cookie 完整 */
@@ -1388,6 +1415,7 @@ export default class WereadMpCatcher extends Plugin {
 
     if (!chk.ok) {
       this.settings.webLoginOk = false;
+      this.settings.webLoginVerdict = 'expired';
       this.settings.webLoginAt = stamp;
       this.settings.webLoginMsg = `登录信息不完整：${describeCookieCheck(chk)}（需重新扫码）`;
       await this.saveAll();
@@ -1399,6 +1427,7 @@ export default class WereadMpCatcher extends Plugin {
     const probe = await probeAccess(this.http, ck).catch(() => null);
     if (!probe) {
       this.settings.webLoginOk = false;
+      this.settings.webLoginVerdict = 'unknown';
       this.settings.webLoginAt = stamp;
       this.settings.webLoginMsg = '接口探针无响应（网络超时），稍后重试';
       await this.saveAll();
@@ -1407,6 +1436,8 @@ export default class WereadMpCatcher extends Plugin {
     }
 
     this.settings.webLoginOk = probe.verdict === 'ok';
+    this.settings.webLoginVerdict =
+      probe.verdict === 'ok' ? 'ok' : probe.verdict === 'restricted' ? 'restricted' : 'expired';
     this.settings.webLoginAt = stamp;
     this.settings.webLoginMsg = probe.hint;
     await this.saveAll();
@@ -2311,6 +2342,8 @@ export default class WereadMpCatcher extends Plugin {
 /* -------------------------------- settings -------------------------------- */
 
 class WMSettingTab extends PluginSettingTab {
+  /** 本次打开设置页是否已经自动做过一次网页登录态实测 */
+  private autoProbed = false;
   plugin: WereadMpCatcher;
   private accountsDraft = '';
 
@@ -2362,7 +2395,8 @@ class WMSettingTab extends PluginSettingTab {
     } else {
       card.createDiv({ cls: 'wmc-login-avatar is-empty' });
     }
-    card.createDiv({ cls: `wmc-login-dot is-${st}` });
+    const dot = this.plugin.loginDotState();
+    card.createDiv({ cls: `wmc-login-dot is-${dot}` });
     const txt = card.createDiv('wmc-login-text');
     txt.createDiv({
       cls: 'wmc-login-title',
@@ -2383,11 +2417,17 @@ class WMSettingTab extends PluginSettingTab {
           .join(' · '),
       });
       // 第二行：网页登录态（短命，列表/正文全靠它）—— 这里才是 -2012 的来源
-      const webOk = this.plugin.settings.webLoginOk;
+      const webCls = dot === 'full' ? 'is-ok' : dot === 'restricted' ? 'is-warn' : dot === 'bad' ? 'is-bad' : 'is-unknown';
       txt.createDiv({
-        cls: `wmc-login-web ${webOk === true ? 'is-ok' : webOk === false ? 'is-bad' : 'is-unknown'}`,
+        cls: `wmc-login-web ${webCls}`,
         text: `网页登录态：${this.plugin.webLoginSummary()}`,
       });
+    }
+
+    // 从没测过网页登录态时，打开设置页自动测一次：绿点/红点必须来自实测，不能停在「未检测」
+    if (st !== 'none' && this.plugin.settings.webLoginOk === undefined && !this.autoProbed) {
+      this.autoProbed = true;
+      void this.plugin.verifyCookieLive(false).then(() => this.refreshUI());
     }
 
     // 有登录态但还没拉过资料时，异步补一次（不阻塞界面）

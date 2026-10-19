@@ -2710,6 +2710,10 @@
   color: var(--wmc-err);
 }
 
+.wmc-login-web.is-warn {
+  color: var(--wmc-warn);
+}
+
 .wmc-login-web.is-unknown {
   color: var(--text-faint);
 }
@@ -2878,8 +2882,18 @@
   background: var(--wmc-ok);
 }
 
-.wmc-login-dot.is-cookie {
+.wmc-login-dot.is-cookie,
+.wmc-login-dot.is-restricted {
   background: var(--wmc-warn);
+}
+
+.wmc-login-dot.is-bad {
+  background: var(--wmc-err);
+}
+
+/* 未实测：中性灰，绝不用绿色 —— 绿点必须来自真实接口结论 */
+.wmc-login-dot.is-unknown {
+  background: var(--wmc-ink-4);
 }
 
 .wmc-login-text {
