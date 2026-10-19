@@ -229,22 +229,7 @@
   color: var(--wmc-ink-1);
 }
 
-.wmc-channel {
-  height: 26px;
-  padding: 0 9px;
-  border: 1px solid var(--wmc-line);
-  border-radius: var(--wmc-r-sm);
-  background: transparent;
-  font-size: 12px;
-  color: var(--wmc-ink-2);
-  box-shadow: none;
-  cursor: pointer;
-}
 
-.wmc-channel:hover {
-  background: var(--wmc-hover);
-  color: var(--wmc-ink-1);
-}
 
 /* ------------------------------- primitives -------------------------------- */
 .wmc-root .wmc-icon-btn {
@@ -1152,11 +1137,6 @@
   text-underline-offset: 2px;
 }
 
-.wmc-list-meta {
-  padding: 8px 14px 2px;
-  font-size: 11px;
-  color: var(--wmc-ink-4);
-}
 
 /* -------------------------------- 详情页 --------------------------------- */
 .wmc-detail-head {
@@ -2037,30 +2017,8 @@
   color: var(--text-muted);
 }
 
-:is(.wmc-bf-x):is(.wmc-bf-x) {
-  flex: 0 0 auto;
-  width: 26px;
-  height: 26px;
-  display: grid;
-  place-items: center;
-  padding: 0;
-  border: 0;
-  border-radius: 6px;
-  background: transparent;
-  box-shadow: none;
-  color: var(--text-muted);
-  cursor: pointer;
-}
 
-:is(.wmc-bf-x:hover):is(.wmc-bf-x:hover) {
-  background: color-mix(in srgb, var(--text-normal, #fff) 9%, transparent);
-  color: var(--text-normal);
-}
 
-.wmc-bf-x .svg-icon {
-  width: 14px;
-  height: 14px;
-}
 
 /* ------------------------------ 分区标题 ------------------------------ */
 .wmc-bf-sec {
@@ -2728,35 +2686,6 @@
 }
 
 
-/* iframe 登录窗 */
-.wmc-login-iframe-box {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-}
-
-.wmc-login-tip {
-  font-size: 12px;
-  line-height: 1.6;
-  color: var(--text-muted);
-}
-
-
-.wmc-login-status {
-  font-size: 11.5px;
-  color: var(--text-muted);
-  font-variant-numeric: tabular-nums;
-}
-
-.wmc-login-frame {
-  width: 100%;
-  height: 68vh;
-  min-height: 420px;
-  border: 1px solid var(--wmc-line, rgba(255, 255, 255, 0.12));
-  border-radius: 8px;
-  background: #fff;
-}
-
 /* ------------------------------ QR login modal --------------------------- */
 
 .wmc-qr-modal {
@@ -2822,47 +2751,11 @@
 
 /* ---------------------------------- menu --------------------------------- */
 
-.wmc-menu {
-  min-width: 176px;
-  padding: 4px;
-  border: 1px solid var(--wmc-line-2);
-  border-radius: var(--wmc-r-md);
-  background: var(--wmc-surface);
-  box-shadow: 0 8px 28px -12px rgba(15, 13, 40, 0.55);
-}
 
-.wmc-menu-item {
-  display: flex;
-  align-items: center;
-  height: 27px;
-  padding: 0 8px;
-  border-radius: var(--wmc-r-xs);
-  font-size: 12px;
-  color: var(--wmc-ink-1);
-  cursor: pointer;
-  transition: background var(--wmc-120) var(--wmc-ease);
-}
 
-.wmc-menu-item:hover {
-  background: var(--wmc-hover);
-}
 
-.wmc-menu-item.is-active {
-  color: var(--wmc-brand-fg);
-  font-weight: 500;
-}
 
-.wmc-menu-ico {
-  display: inline-flex;
-  width: 16px;
-  margin-right: 6px;
-  color: var(--wmc-ink-4);
-}
 
-.wmc-menu-ico .svg-icon {
-  width: 13px;
-  height: 13px;
-}
 
 /* --------------------------- 设置页：登录卡 / 选号 --------------------------- */
 .wmc-settings .wmc-login {
@@ -3014,54 +2907,6 @@
   font-family: var(--font-monospace);
 }
 
-.wmc-accounts-input {
-  width: 100%;
-  min-height: 64px;
-  padding: 8px 10px;
-  border: 1px solid var(--wmc-line);
-  border-radius: var(--wmc-r-sm);
-  background: var(--wmc-inset);
-  font-family: var(--font-monospace);
-  font-size: 11.5px;
-  line-height: 1.6;
-  box-shadow: none;
-}
-
-/* -------------------------- 旧结构兜底（避免空白） -------------------------- */
-.wmc-root .wmc-listwrap,
-.wmc-root .wmc-reader,
-.wmc-root .wmc-backfill,
-.wmc-root .wmc-backfill-body,
-.wmc-root .wmc-backfill-tip,
-.wmc-root .wmc-adv,
-.wmc-root .wmc-cookie,
-.wmc-root .wmc-status,
-.wmc-root .wmc-dot,
-.wmc-root .wmc-row,
-.wmc-root .wmc-row-main,
-.wmc-root .wmc-row-title,
-.wmc-root .wmc-row-sub,
-.wmc-root .wmc-row-meta,
-.wmc-root .wmc-row-date,
-.wmc-root .wmc-thumb,
-.wmc-root .wmc-resizer,
-.wmc-root .wmc-list,
-.wmc-root .wmc-list-head,
-.wmc-root .wmc-reader-head,
-.wmc-root .wmc-reader-title,
-.wmc-root .wmc-reader-meta,
-.wmc-root .wmc-reader-body,
-.wmc-root .wmc-reader-actions,
-.wmc-root .wmc-progress-label {
-  display: block;
-  margin: 0;
-  padding: 0;
-  border: 0;
-  background: none;
-  color: inherit;
-  font: inherit;
-  float: none;
-}
 
 /* -------------------------------- responsive ------------------------------ */
 @media (max-width: 760px) {

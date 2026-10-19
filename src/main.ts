@@ -1,6 +1,5 @@
 import {
   App,
-  Modal,
   Notice,
   Plugin,
   PluginSettingTab,
@@ -36,7 +35,6 @@ import { ASSET_AVATAR, ASSET_MP_QR, ASSET_TIP_QR } from './core/assets';
 import type { BfItem, BfProgress, BfResult } from './core/bf';
 import {
   childProcessModule,
-  createWebviewElement,
   electronModule,
   isArr,
   isObj,
@@ -52,7 +50,6 @@ import {
   type CliChild,
   type CdpTarget,
   type CookieItem,
-  type WebviewElement,
 } from './core/typed';
 import { WereadAgentApi, fetchApiKey } from './core/weread-api';
 import {
@@ -325,7 +322,6 @@ export default class WereadMpCatcher extends Plugin {
    * 一篇 3.5MB，归档之后马上点「原文」不该再下一次。
    */
   private contentCache = new Map<string, string>();
-  private loginPolling = false;
   private statusEl: HTMLElement | null = null;
 
   private watch: WatchStatus = {
@@ -899,20 +895,6 @@ export default class WereadMpCatcher extends Plugin {
 
   /* --------------------------------- cookie -------------------------------- */
 
-  /** 尝试从 Obsidian(Electron) session 读取 weread cookie；不可用时返回 null */
-  async tryReadSessionCookie(): Promise<string | null> {
-    try {
-      // 运行时按需加载 electron 模块：静态 import 会在移动端直接崩
-      const cookies = electronModule()?.remote?.session?.defaultSession?.cookies;
-      if (!cookies?.get) return null;
-      const list = await cookies.get({ domain: '.weread.qq.com' });
-      if (!list?.length) return null;
-      return list.map((c) => `${c.name}=${c.value}`).join('; ');
-    } catch {
-      return null;
-    }
-  }
-
   /**
    * 扫码登录入口（命令面板 / 设置页共用）。
    * 旧实现依赖 webview 读 document.cookie，Obsidian 默认不放行 → 扫码永远没反应；
@@ -944,40 +926,6 @@ export default class WereadMpCatcher extends Plugin {
         );
       },
     }).open();
-  }
-
-  /** 轮询直到 cookie 成熟（wr_skey 为长串）。扫码确认前会拿到 8 字符临时值，必须等它变长。 */
-  private async waitForMatureCookie(maxWaitMs: number): Promise<boolean> {
-    const start = Date.now();
-    while (Date.now() - start < maxWaitMs) {
-      const ck = await this.tryReadSessionCookie();
-      if (ck) {
-        const chk = checkCookie(ck);
-        if (chk.ok) {
-          this.settings.cookie = ck;
-          await this.saveAll();
-          void this.verifyCookieLive(false);
-          this.emitWatch();
-          return true;
-        }
-      }
-      await new Promise((r) => window.setTimeout(r, 2000));
-    }
-    return false;
-  }
-
-  async importSessionCookie(): Promise<boolean> {
-    const ck = await this.tryReadSessionCookie();
-    if (!ck) return false;
-    const chk = checkCookie(ck);
-    if (!chk.ok) {
-      new Notice(`读到的 Cookie 不完整（缺 ${chk.missing.join(', ')}），已拒绝覆盖现有配置`, 8000);
-      return false;
-    }
-    this.settings.cookie = ck;
-    await this.saveAll();
-    await this.verifyCookieLive(true);
-    return true;
   }
 
   /* ------------------------------ 补图 / 再采集 ------------------------------ */
@@ -1383,143 +1331,6 @@ export default class WereadMpCatcher extends Plugin {
     this.startQrLogin();
   }
 
-  /**
-   * 旧的内嵌 webview 登录（保留作应急方案）：
-   * Obsidian 把 window.open 转给了系统浏览器（setWindowOpenHandler），
-   * 所以扫码窗口必须用同源 iframe —— cookie 落在 Obsidian 的 defaultSession，
-   * 之后 requestUrl 自动携带，不需要读取 cookie（绕过 electron.remote 被移除的问题）。
-   */
-  startWebviewLoginLegacy(): void {
-    const modal = new Modal(this.app);
-    modal.titleEl.setText('扫码登录微信读书');
-    const box = modal.contentEl.createDiv('wmc-login-iframe-box');
-    box.createDiv({
-      cls: 'wmc-login-tip',
-      text: '在下面窗口里用微信扫码。检测到登录态后会自动关闭并同步书架，不需要复制任何东西。',
-    });
-    const status = box.createDiv({ cls: 'wmc-login-status', text: '等待扫码…' });
-    // 必须用 webview 而不是 iframe：iframe 跨域读不到 document.cookie，
-    // webview 是独立 webContents，executeJavaScript 能在目标页上下文里取 cookie。
-    let wv: WebviewElement | null = null;
-    try {
-      wv = createWebviewElement();
-      wv.className = 'wmc-login-frame';
-      wv.setAttribute('src', 'https://weread.qq.com/');
-      wv.setAttribute('allowpopups', 'false');
-      box.appendChild(wv);
-    } catch {
-      wv = null;
-    }
-    if (!wv) {
-      const frame = box.createEl('iframe', { cls: 'wmc-login-frame' });
-      frame.setAttr('src', 'https://weread.qq.com/');
-    }
-    this.loginPolling = true;
-    modal.open();
-
-    // 手动兜底：探测卡住时用户可点这个立刻重试
-    let probeNow: (() => Promise<boolean>) | null = null;
-    const manual = box.createEl('button', { cls: 'wmc-hero-btn', text: '我已经扫码了，立即同步' });
-    manual.addEventListener('click', () => {
-      void (async () => {
-        status.setText('正在检测登录态…');
-        if (probeNow && (await probeNow())) return;
-        status.setText('还没检测到登录态，再等一下或重扫一次');
-      })();
-    });
-
-    let finished = false;
-    const finish = async (): Promise<boolean> => {
-      if (finished) return true;
-      let ok = false;
-      // ① webview 内直接读 document.cookie —— 最可靠，能拿到 wr_skey/wr_vid/wr_gid
-      if (wv && typeof wv.executeJavaScript === 'function') {
-        try {
-          const raw = await wv.executeJavaScript('document.cookie');
-          const str = typeof raw === 'string' ? raw : '';
-          if (/wr_skey=/.test(str) && /wr_vid=/.test(str)) {
-            this.settings.cookie = normalizeCookie(str);
-            this.settings.useSession = false;
-            ok = true;
-          }
-        } catch {
-          /* 页面还没加载完，下次再试 */
-        }
-      }
-      // ② 老环境能直接读 cookie
-      if (!ok) {
-        const ck = await this.tryReadSessionCookie();
-        if (ck && checkCookie(ck).ok) {
-          this.settings.cookie = normalizeCookie(ck);
-          this.settings.useSession = false;
-          ok = true;
-        }
-      }
-      // ③ 最后兜底：session 探测
-      if (!ok && (await this.probeSessionLogin())) {
-        this.settings.useSession = true;
-        ok = true;
-      }
-      if (!ok) return false;
-
-      finished = true;
-      this.loginPolling = false;
-      status.setText('登录成功，正在同步…');
-      try {
-        modal.close(); // 先关窗，用户在设置页就能看到信息卡刷新
-      } catch {
-        /* 用户已手动关闭 */
-      }
-      const key = await this.refreshApiKey().catch(() => null);
-      const prof = await this.refreshProfile().catch(() => null);
-      const n = await this.syncAccountsFromShelf().catch(() => 0);
-      const web = await this.checkWebLogin().catch(() => ({ ok: false, msg: '未知' }));
-      this.notifyViews();
-      this.renderStatus();
-      this.emitWatch();
-      new Notice(
-        `登录成功${prof?.name ? `：${prof.name}` : ''}${key ? ' · 已换出官方 Key' : ''}${
-          n ? ` · 书架 ${n} 个` : ''
-        }${web.ok ? ' · 列表可用' : ` · 列表仍不通：${web.msg}`}`,
-        web.ok ? 10000 : 16000,
-      );
-      return true;
-    };
-    probeNow = finish;
-
-    // 微信读书登录成功后会跳转页面 → iframe 触发 load，立刻探测一次
-    if (wv && typeof wv.addEventListener === 'function') {
-      wv.addEventListener('dom-ready', () => {
-        void finish();
-      });
-      wv.addEventListener('did-navigate', () => {
-        void finish();
-      });
-      wv.addEventListener('did-navigate-in-page', () => {
-        void finish();
-      });
-    }
-
-    void (async () => {
-      const t0 = Date.now();
-      let tries = 0;
-      while (this.loginPolling && Date.now() - t0 < 6 * 60 * 1000) {
-        await sleep(1800);
-        tries++;
-        if (finished) return;
-        if (tries % 3 === 0) status.setText(`等待扫码…（已检测 ${tries} 次，登录后会自动关闭）`);
-        if (await finish()) return;
-      }
-      this.loginPolling = false;
-      try {
-        modal.close();
-      } catch {
-        /* noop */
-      }
-      new Notice('等待扫码超时（6 分钟），已关闭窗口', 8000);
-    })();
-  }
-
   /** 启动自检：没有 cookie 但 Obsidian session 里已登录 → 自动切 session 模式 */
   async autoDetectSession(): Promise<void> {
     if (this.hasLogin()) return;
@@ -1782,10 +1593,6 @@ export default class WereadMpCatcher extends Plugin {
       new Notice(`同步书架失败：${e instanceof Error ? e.message : String(e)}`, 8000);
       return 0;
     }
-  }
-
-  cancelQrLogin(): void {
-    this.loginPolling = false;
   }
 
   /* -------------------------------- watching ------------------------------- */

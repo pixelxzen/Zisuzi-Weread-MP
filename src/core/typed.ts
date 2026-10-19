@@ -108,28 +108,6 @@ export function processEnv(): Record<string, string> {
   return w.process?.env ?? {};
 }
 
-/* --------------------------------- webview --------------------------------- */
-
-type WebviewEvent = 'dom-ready' | 'did-navigate' | 'did-navigate-in-page';
-
-export interface WebviewElement extends HTMLElement {
-  executeJavaScript(code: string): Promise<unknown>;
-  addEventListener(type: WebviewEvent, cb: () => void): void;
-  addEventListener(type: string, cb: (ev: Event) => void): void;
-}
-
-declare global {
-  // Electron 的 <webview> 标签不在标准 DOM 类型表里；声明进来后就能用 Obsidian 的 createEl 创建
-  interface HTMLElementTagNameMap {
-    webview: WebviewElement;
-  }
-}
-
-/** 创建 <webview>；浏览器端（无 webviewTag）会抛错，调用方自行兜底 */
-export function createWebviewElement(): WebviewElement {
-  return createEl('webview');
-}
-
 /* ------------------------------ Obsidian adapter ----------------------------- */
 
 /** vault.adapter 在桌面端是 FileSystemAdapter，有 getBasePath() */
@@ -168,18 +146,6 @@ export function isObj(v: unknown): v is Record<string, unknown> {
 
 export function isArr(v: unknown): v is unknown[] {
   return Array.isArray(v);
-}
-
-export function asStr(v: unknown, fallback = ''): string {
-  if (typeof v === 'string') return v;
-  if (typeof v === 'number' || typeof v === 'boolean') return String(v);
-  return fallback;
-}
-
-export function asNum(v: unknown, fallback = 0): number {
-  if (typeof v === 'number' && Number.isFinite(v)) return v;
-  if (typeof v === 'string' && v.trim() !== '' && Number.isFinite(Number(v))) return Number(v);
-  return fallback;
 }
 
 /** 从对象里按顺序取第一个非空字符串字段 */
