@@ -511,8 +511,8 @@ export default class WereadMpCatcher extends Plugin {
     });
     this.addCommand({
       id: 'open-login',
-      name: '打开微信读书登录窗口',
-      callback: () => this.openLoginWindow(),
+      name: '扫码登录微信读书（内嵌窗口）',
+      callback: () => this.startIframeLogin(),
     });
     this.addCommand({
       id: 'logout-account',
@@ -631,51 +631,39 @@ export default class WereadMpCatcher extends Plugin {
       // 运行时按需加载 electron 模块：静态 import 会在移动端直接崩
       const cookies = electronModule()?.remote?.session?.defaultSession?.cookies;
       if (!cookies?.get) return null;
-      const list = await cookies.get({ domain: '.weread.qq.com' });
-      if (!list?.length) return null;
-      return list.map((c) => `${c.name}=${c.value}`).join('; ');
+      // 必须用 url 过滤：weread 的 wr_vid/wr_skey 是 host-only cookie，
+      // domain 过滤 '.weread.qq.com' 匹配不到它们（只返回域 cookie，如 wr_gid），
+      // 导致 checkCookie 缺项；url 过滤返回该 URL 请求会带上的全部 cookie（含 HttpOnly）。
+      const list = (await cookies.get({ url: 'https://weread.qq.com/' })) ?? [];
+      if (list.length) return list.map((c) => `${c.name}=${c.value}`).join('; ');
+      // 兜底：个别环境 url 过滤不可用时退回 domain 过滤
+      const list2 = (await cookies.get({ domain: '.weread.qq.com' })) ?? [];
+      if (!list2.length) return null;
+      return list2.map((c) => `${c.name}=${c.value}`).join('; ');
     } catch {
       return null;
     }
   }
 
-  /** 打开登录窗口（Electron 新窗口，与 Obsidian 共享 session），并轮询等 cookie 成熟后自动写入 */
-  openLoginWindow() {
-    const w = window.open('https://weread.qq.com/', '_blank');
-    if (!w) {
-      new Notice('无法打开窗口：请改用浏览器登录后粘贴 cookie');
-      return;
+  /**
+   * 从 webview 自己的 WebContents session 读 cookie。
+   * webview 未设 partition 时本就共享 app defaultSession（Electron 官方规范），
+   * 但走 getWebContentsId → remote.webContents.fromId 直读更稳：
+   * 不依赖 session 共享假设，且拿到的就是该 webview 的真实登录态（含 HttpOnly cookie）。
+   */
+  private async readWebviewSessionCookie(wv: WebviewElement): Promise<string | null> {
+    try {
+      const id = wv.getWebContentsId?.();
+      if (id == null) return null;
+      const wc = electronModule()?.remote?.webContents?.fromId?.(id);
+      const cookies = wc?.session?.cookies;
+      if (!cookies?.get) return null;
+      const list = (await cookies.get({ url: 'https://weread.qq.com/' })) ?? [];
+      if (!list.length) return null;
+      return list.map((c) => `${c.name}=${c.value}`).join('; ');
+    } catch {
+      return null;
     }
-    new Notice('扫码登录中…完成后会自动写入（最长等 90 秒）', 6000);
-    void this.waitForMatureCookie(90000).then((ok) => {
-      if (ok) {
-        new Notice('登录成功，完整 cookie 已写入');
-        void this.refreshApiKey();
-        void this.refreshProfile();
-      } else {
-        new Notice('90 秒内没读到完整登录态。若已扫码，请点「设置 → 读取登录态」重试', 10000);
-      }
-    });
-  }
-
-  /** 轮询直到 cookie 成熟（wr_skey 为长串）。扫码确认前会拿到 8 字符临时值，必须等它变长。 */
-  private async waitForMatureCookie(maxWaitMs: number): Promise<boolean> {
-    const start = Date.now();
-    while (Date.now() - start < maxWaitMs) {
-      const ck = await this.tryReadSessionCookie();
-      if (ck) {
-        const chk = checkCookie(ck);
-        if (chk.ok) {
-          this.settings.cookie = ck;
-          await this.saveAll();
-          void this.verifyCookieLive(false);
-          this.emitWatch();
-          return true;
-        }
-      }
-      await new Promise((r) => window.setTimeout(r, 2000));
-    }
-    return false;
   }
 
   async importSessionCookie(): Promise<boolean> {
@@ -1094,8 +1082,11 @@ export default class WereadMpCatcher extends Plugin {
       wv = null;
     }
     if (!wv) {
+      // 兜底：webview 不可用时退 iframe。weread 可能带 X-Frame-Options 拒嵌，
+      // 白屏时用户至少能看到提示，而不是对着一个空框发呆。
       const frame = box.createEl('iframe', { cls: 'wmc-login-frame' });
       frame.setAttr('src', 'https://weread.qq.com/');
+      status.setText('内嵌窗口不可用，已退化为基础模式；若下方空白，请更新 Obsidian 到最新版后重试');
     }
     this.loginPolling = true;
     modal.open();
@@ -1115,21 +1106,19 @@ export default class WereadMpCatcher extends Plugin {
     const finish = async (): Promise<boolean> => {
       if (finished) return true;
       let ok = false;
-      // ① webview 内直接读 document.cookie —— 最可靠，能拿到 wr_skey/wr_vid/wr_gid
-      if (wv && typeof wv.executeJavaScript === 'function') {
-        try {
-          const raw = await wv.executeJavaScript('document.cookie');
-          const str = typeof raw === 'string' ? raw : '';
-          if (/wr_skey=/.test(str) && /wr_vid=/.test(str)) {
-            this.settings.cookie = normalizeCookie(str);
-            this.settings.useSession = false;
-            ok = true;
-          }
-        } catch {
-          /* 页面还没加载完，下次再试 */
+      // ① webview 自己的 WebContents session 直读 —— 最可靠：
+      //    cookies.get 的 url 过滤返回该 URL 请求会带上的全部 cookie，
+      //    HttpOnly 的 wr_skey/wr_rt 和 host-only 的 wr_vid/wr_gid 都能拿到
+      //    （document.cookie 看不到 HttpOnly；domain 过滤 '.weread.qq.com' 会漏 host-only，都踩过坑）
+      if (wv) {
+        const ck = await this.readWebviewSessionCookie(wv);
+        if (ck && checkCookie(ck).ok) {
+          this.settings.cookie = normalizeCookie(ck);
+          this.settings.useSession = false;
+          ok = true;
         }
       }
-      // ② 老环境能直接读 cookie
+      // ② defaultSession（webview 未设 partition 时本来就是 default session，双保险）
       if (!ok) {
         const ck = await this.tryReadSessionCookie();
         if (ck && checkCookie(ck).ok) {
@@ -1138,7 +1127,23 @@ export default class WereadMpCatcher extends Plugin {
           ok = true;
         }
       }
-      // ③ 最后兜底：session 探测
+      // ③ 页面上下文 document.cookie：非 HttpOnly 才可见，极端环境兜底；
+      //    必须过 checkCookie 四项校验——只正则匹配 wr_skey/wr_vid 就存，
+      //    会把缺 wr_rt/wr_gid 的残cookie 写进设置，之后一抓就报 -2012
+      if (!ok && wv && typeof wv.executeJavaScript === 'function') {
+        try {
+          const raw = await wv.executeJavaScript('document.cookie');
+          const str = typeof raw === 'string' ? raw : '';
+          if (str && checkCookie(str).ok) {
+            this.settings.cookie = normalizeCookie(str);
+            this.settings.useSession = false;
+            ok = true;
+          }
+        } catch {
+          /* 页面还没加载完，下次再试 */
+        }
+      }
+      // ④ 最后兜底：session 探测
       if (!ok && (await this.probeSessionLogin())) {
         this.settings.useSession = true;
         ok = true;
@@ -1467,56 +1472,15 @@ export default class WereadMpCatcher extends Plugin {
     }
   }
 
-  /** 扫码登录：开窗口 → 轮询登录态 → 存登录态 + 换官方 Key + 同步书架 */
-  async startQrLogin(): Promise<void> {
-    const w = window.open('https://weread.qq.com/', '_blank');
-    if (!w) {
-      new Notice('无法打开登录窗口；请允许 Obsidian 打开新窗口');
-      return;
-    }
-    new Notice('已打开登录窗口：微信扫码后自动完成，不需要复制任何东西', 10000);
-    this.loginPolling = true;
-    const t0 = Date.now();
-    while (this.loginPolling && Date.now() - t0 < 6 * 60 * 1000) {
-      await sleep(2500);
-      let ok = false;
-      // A) 老环境能直接读到 cookie
-      const ck = await this.tryReadSessionCookie();
-      if (ck && checkCookie(ck).ok) {
-        this.settings.cookie = normalizeCookie(ck);
-        this.settings.useSession = false;
-        ok = true;
-      }
-      // B) 读不到 cookie（Obsidian 1.14 已移除 electron.remote）→ 请求探测 session 登录态
-      if (!ok && (await this.probeSessionLogin())) {
-        this.settings.useSession = true;
-        ok = true;
-      }
-      if (!ok) continue;
-      const key = await this.refreshApiKey();
-      if (key) this.settings.wereadApiKey = key;
-      await this.saveAll();
-      this.loginPolling = false;
-      try {
-        w.close();
-      } catch {
-        /* 用户已手动关闭 */
-      }
-      // 关键：拿到登录态后立刻拉资料与书架，否则信息卡/订阅列表要等用户手动操作才出现
-      const prof = await this.refreshProfile().catch(() => null);
-      const n = await this.syncAccountsFromShelf();
-      this.notifyViews();
-      this.renderStatus();
-      this.emitWatch();
-      new Notice(
-        `登录成功${prof?.name ? `：${prof.name}` : ''}${key ? '，已获取官方 Key' : ''}${
-          n ? `；书架 ${n} 个公众号` : ''
-        }`,
-        10000,
-      );
-      return;
-    }
-    this.loginPolling = false;
+  /**
+   * 扫码登录统一入口。
+   * 历史教训（Windows 上「点扫码登录却跳出默认浏览器」的根因）：
+   * 不能用 window.open 开 weread.qq.com —— Obsidian 桌面端通过 Electron 的
+   * setWindowOpenHandler 把 window.open 一律转交系统默认浏览器，登录态落在浏览器
+   * session 里，插件侧（requestUrl / electron.remote）根本读不到，必须走内嵌 webview 窗口。
+   */
+  startQrLogin(): void {
+    this.startIframeLogin();
   }
 
   cancelQrLogin(): void {
