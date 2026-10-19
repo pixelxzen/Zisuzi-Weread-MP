@@ -1139,6 +1139,19 @@
   text-align: center;
 }
 
+/* 侧栏「原文」里直接展示的公众号地址：长 URL 必须能折行，否则撑破面板 */
+.wmc-root .wmc-mp-url {
+  display: block;
+  padding: 14px 16px 4px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--wmc-brand, #6c5ce7);
+  word-break: break-all;
+  overflow-wrap: anywhere;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
 .wmc-list-meta {
   padding: 8px 14px 2px;
   font-size: 11px;
@@ -2742,6 +2755,69 @@
   border: 1px solid var(--wmc-line, rgba(255, 255, 255, 0.12));
   border-radius: 8px;
   background: #fff;
+}
+
+/* ------------------------------ QR login modal --------------------------- */
+
+.wmc-qr-modal {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.wmc-qr-tip {
+  font-size: 12.5px;
+  line-height: 1.7;
+  color: var(--text-muted);
+}
+
+.wmc-qr-box {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 12px;
+  border: 1px solid var(--wmc-line, rgba(127, 127, 127, 0.2));
+  border-radius: 10px;
+  background: #fff;
+}
+
+.wmc-qr-img {
+  width: 240px;
+  height: 240px;
+  display: block;
+  image-rendering: pixelated;
+}
+
+.wmc-qr-img.is-hidden {
+  display: none;
+}
+
+.wmc-qr-status {
+  font-size: 13px;
+  font-weight: 600;
+  text-align: center;
+  color: var(--text-normal);
+}
+
+.wmc-qr-hint {
+  font-size: 11.5px;
+  text-align: center;
+  color: var(--text-muted);
+  min-height: 16px;
+}
+
+.wmc-qr-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: center;
+}
+
+.wmc-qr-cookie {
+  width: 100%;
+  margin: 8px 0;
+  font-family: var(--font-monospace);
+  font-size: 11.5px;
+  resize: vertical;
 }
 
 /* ---------------------------------- menu --------------------------------- */

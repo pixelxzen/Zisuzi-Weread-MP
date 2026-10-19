@@ -29,6 +29,7 @@ export interface CliChild {
   stderr?: CliReadable | null;
   on(event: 'error', cb: (e: unknown) => void): unknown;
   on(event: 'close', cb: (code: number | null) => void): unknown;
+  kill?: () => void;
 }
 
 export interface ChildProcessModule {
@@ -80,6 +81,25 @@ export function childProcessModule(): ChildProcessModule | null {
 
 export function nodeOs(): NodeOs | null {
   return safeRequire<NodeOs>('os');
+}
+
+/** 运行平台：win32 / darwin / linux（Electron 渲染进程里有 process.platform） */
+export function platformName(): string {
+  try {
+    const w = window as unknown as { process?: { platform?: string } };
+    if (w.process?.platform) return w.process.platform;
+  } catch {
+    /* 非浏览器环境 */
+  }
+  try {
+    if (typeof navigator !== 'undefined') {
+      if (/^Win/i.test(navigator.platform)) return 'win32';
+      if (/Mac/i.test(navigator.platform)) return 'darwin';
+    }
+  } catch {
+    /* noop */
+  }
+  return '';
 }
 
 /** process.env（GUI 进程里 PATH 通常残缺，需要自己补） */

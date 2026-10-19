@@ -6,6 +6,7 @@
  */
 
 import { isObj, parseJson, pickStr } from './typed';
+import { WEREAD_UA } from './weread';
 export interface HttpRespLike {
   status: number;
   text: string;
@@ -79,7 +80,7 @@ export class WereadAgentApi {
   async mpAccounts(): Promise<Array<{ name: string; bookId: string }>> {
     const { books } = await this.shelfSync();
     return books
-      .filter((b) => String(b.bookId || '').startsWith('MP_WXS_'))
+      .filter((b) => String(b.bookId || '').toUpperCase().startsWith('MP_WXS_'))
       .map((b) => ({ name: b.title || b.bookId, bookId: b.bookId }));
   }
 
@@ -108,8 +109,7 @@ export async function fetchApiKey(http: HttpFn, cookie: string): Promise<string 
     {
       Cookie: cookie,
       Referer: 'https://weread.qq.com/',
-      'User-Agent':
-        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+      'User-Agent': WEREAD_UA,
       Accept: 'application/json, text/plain, */*',
     },
     'GET',

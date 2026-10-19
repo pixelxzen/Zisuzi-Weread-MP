@@ -1,0 +1,10 @@
+{
+  "id": "weread-mp-fork",
+  "name": "Weread MP · 微信读书公众号（Fork）",
+  "version": "4.4.5",
+  "minAppVersion": "1.13.0",
+  "description": "微信读书公众号盯采：把书架里订阅的公众号更新归档为本地 Markdown 笔记（含图片/音视频）。Archive WeRead MP articles as local Markdown notes.",
+  "author": "紫苏子ACG",
+  "authorUrl": "https://github.com/pixelxzen",
+  "isDesktopOnly": true
+}

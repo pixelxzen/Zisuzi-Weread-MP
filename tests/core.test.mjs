@@ -42,6 +42,33 @@ test('无 js_content（纯视频推送）返回空 markdown', () => {
   assert.equal(markdown, '');
 });
 
+// 2026-10-19 线上反馈：约 1/3 文章「正文提取失败」，实测两种成因
+test('js_content 同名装饰容器（share_notice）不能抢走正文', () => {
+  const html = `<body>
+    <div id="js_content" class="share_notice_wrp"><p>分享提示</p></div>
+    <div id="js_content" class="rich_media_content"><p>真正的正文第一段</p><p>第二段</p></div>
+  </body>`;
+  const { markdown } = md.htmlToMarkdown(html);
+  assert.ok(markdown.includes('真正的正文第一段'));
+  assert.ok(markdown.includes('第二段'));
+});
+
+test('没有 js_content 时退回内联 JS 的 content_noencode（\\x0a 分段）', () => {
+  const html = `<script>window.__x = { content_noencode: '第一段\\x0a\\x0a第二段\\x0a第三行' };</script>`;
+  const { markdown } = md.htmlToMarkdown(html);
+  assert.ok(markdown.includes('第一段'));
+  assert.ok(markdown.includes('第二段'));
+});
+
+test('content_noencode 取最长的一份（页面里会重复出现主副两处）', () => {
+  const html = `<script>
+    var a = { content_noencode: '短' };
+    var b = { content_noencode: '这是一段明显更长的正文内容，用来确认取到的是完整那份。' };
+  </script>`;
+  const t = md.extractNoencodeText(html);
+  assert.ok(t.includes('明显更长'));
+});
+
 test('safeFileName 去掉非法字符并限长', () => {
   const n = md.safeFileName('科技周刊#415：3D 版《看不见的城市》/ 上', 30);
   assert.ok(!/[\\/:*?"<>|#]/.test(n));
@@ -143,4 +170,41 @@ test('列表 200 正常解析且带正确 Referer', async () => {
   assert.equal(items.length, 1);
   assert.equal(seenHeaders.Referer, 'https://weread.qq.com/');
   assert.ok(String(seenHeaders.Cookie).includes('wr_vid=1'));
+});
+
+/* ------------------------- 文章链接（2026-10-19） ------------------------- */
+
+test('extractMpOriginalUrl 优先取 og:url（属性顺序两种都要认）', () => {
+  const html1 =
+    '<head><meta property="og:url" content="https://mp.weixin.qq.com/s?__biz=MzIz&amp;mid=2247&amp;idx=1&amp;sn=abc#rd" /></head>';
+  assert.equal(
+    wr.extractMpOriginalUrl(html1),
+    'https://mp.weixin.qq.com/s?__biz=MzIz&mid=2247&idx=1&sn=abc',
+  );
+
+  const html2 =
+    '<meta content="https://mp.weixin.qq.com/s?__biz=QUJD&amp;mid=1&amp;idx=1&amp;sn=def#rd" property="og:url">';
+  assert.equal(wr.extractMpOriginalUrl(html2), 'https://mp.weixin.qq.com/s?__biz=QUJD&mid=1&idx=1&sn=def');
+});
+
+test('extractMpOriginalUrl 回落：正文里的 mp.weixin 链接', () => {
+  const html = '<div id="js_content"><a href="https://mp.weixin.qq.com/s/AbC-123_x?from=timeline&amp;idx=1">原文</a></div>';
+  const url = wr.extractMpOriginalUrl(html);
+  assert.equal(url, 'https://mp.weixin.qq.com/s/AbC-123_x?from=timeline&idx=1');
+});
+
+test('extractMpOriginalUrl 抓不到时返回空串，不拼假链接', () => {
+  assert.equal(wr.extractMpOriginalUrl('<div id="js_content"><p>没有链接</p></div>'), '');
+  assert.equal(wr.extractMpOriginalUrl(''), '');
+  assert.equal(wr.extractMpOriginalUrl('https://weread.qq.com/web/mp/content?reviewId=x'), '');
+});
+
+test('不再导出 mpArticleUrl（微信读书没有可从外部打开的文章页）', () => {
+  assert.equal(typeof wr.mpArticleUrl, 'undefined');
+});
+
+test('extractMpOriginalUrl 拒绝正文里的 JS 模板串（旧版会写出假链接）', () => {
+  const html =
+    '<script>var u="https://mp.weixin.qq.com/s?__biz=${window.biz}&mid=${window.mid}&idx=${window.idx}&sn=${window.sn}&scene=${window.source}";</script><div id="js_content"></div>';
+  assert.equal(wr.extractMpOriginalUrl(html), '');
 });
