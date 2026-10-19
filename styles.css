@@ -2744,6 +2744,57 @@
   background: #fff;
 }
 
+/* 弹窗宽度设在 modalEl 上（contentEl 只负责内容，会被内容撑破） */
+.wmc-login-modal {
+  width: min(760px, 92vw);
+}
+
+.wmc-login-frame-host {
+  display: block;
+}
+
+/* 出问题时才出现的两条手动出路：重新加载 / 在浏览器打开 */
+.wmc-login-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.wmc-login-actions.is-off {
+  display: none;
+}
+
+.wmc-login-link {
+  height: 28px;
+  padding: 0 10px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 6px;
+  background: var(--background-modifier-hover);
+  box-shadow: none;
+  font-size: 12px;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+.wmc-login-link:hover {
+  color: var(--text-normal);
+  border-color: var(--text-faint);
+}
+
+/* 诊断行：默认隐藏，只在 webview 建不出来 / 加载失败时出现 */
+.wmc-login-diag {
+  display: none;
+  font-size: 11px;
+  line-height: 1.55;
+  color: var(--text-faint);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.wmc-login-diag.is-on {
+  display: block;
+}
+
 /* ---------------------------------- menu --------------------------------- */
 
 .wmc-menu {

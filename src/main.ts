@@ -253,6 +253,8 @@ export default class WereadMpCatcher extends Plugin {
   private timer: number | null = null;
   private running = false;
   private loginPolling = false;
+  /** 当前打开的扫码弹窗（单例） */
+  private loginModal: Modal | null = null;
   private statusEl: HTMLElement | null = null;
 
   private watch: WatchStatus = {
@@ -1028,102 +1030,184 @@ export default class WereadMpCatcher extends Plugin {
   }
 
   /**
-   * iframe 内嵌登录：
-   * Obsidian 把 window.open 转给了系统浏览器（setWindowOpenHandler），
-   * 所以扫码窗口必须用同源 iframe —— cookie 落在 Obsidian 的 defaultSession，
-   * 之后 requestUrl 自动携带，不需要读取 cookie（绕过 electron.remote 被移除的问题）。
+   * 内嵌扫码登录。
+   *
+   * 教训 1（Windows 点扫码却跳系统浏览器）：不能用 window.open 开 weread.qq.com ——
+   * Obsidian 桌面端用 setWindowOpenHandler 把 window.open 一律转交系统默认浏览器，
+   * 登录态落在浏览器 session 里，插件侧读不到，必须走内嵌 webview。
+   *
+   * 教训 2（2026-10-19「小窗白色、页面点不动、找不到二维码」）：原实现先创建游离（未挂载）
+   * 的 webview 并设好 src，之后才 modal.open()。部分 Electron/Obsidian 组合下 guest 不加载，
+   * 表现为白框、无法滚动、点哪都没反应。现在改为：先 open() → 下一帧把 webview 挂进已挂载的
+   * DOM → 再设 src；并加 15 秒 dom-ready 看门狗、失败诊断行与两条手动出路。
+   *
+   * 教训 3（2026-10-19「弹窗刚点就自己消失」）：原判据只看 document.cookie 里有没有
+   * wr_skey/wr_vid —— 过期的旧登录态同样带着这两个键，于是 dom-ready 当场判定成功并 close()，
+   * 用户永远看不到二维码。现在改为：打开时给 cookie 拍快照，只有「cookie 变了」或
+   * 「旧 cookie 经真实接口验证仍然有效」才收工；任何一次收工都必须先过 verifyCookieLive()。
    */
   startIframeLogin(): void {
+    const self = this;
+
+    // 单例：命令/按钮可被连点，叠两个一样的窗口会被当成渲染 bug
+    if (this.loginModal) {
+      try {
+        this.loginModal.close();
+      } catch {
+        /* noop */
+      }
+      this.loginModal = null;
+    }
+
     const modal = new Modal(this.app);
+    this.loginModal = modal;
     modal.titleEl.setText('扫码登录微信读书');
+    modal.modalEl.addClass('wmc-login-modal');
+
     const box = modal.contentEl.createDiv('wmc-login-iframe-box');
     box.createDiv({
       cls: 'wmc-login-tip',
       text: '在下面窗口里用微信扫码。检测到登录态后会自动关闭并同步书架，不需要复制任何东西。',
     });
-    const status = box.createDiv({ cls: 'wmc-login-status', text: '等待扫码…' });
-    // 必须用 webview 而不是 iframe：iframe 跨域读不到 document.cookie，
-    // webview 是独立 webContents，executeJavaScript 能在目标页上下文里取 cookie。
-    let wv: WebviewElement | null = null;
-    try {
-      wv = createWebviewElement();
-      wv.className = 'wmc-login-frame';
-      wv.setAttribute('src', 'https://weread.qq.com/');
-      wv.setAttribute('allowpopups', 'false');
-      box.appendChild(wv);
-    } catch {
-      wv = null;
-    }
-    if (!wv) {
-      // 兜底：webview 不可用时退 iframe。weread 可能带 X-Frame-Options 拒嵌，
-      // 白屏时用户至少能看到提示，而不是对着一个空框发呆。
-      const frame = box.createEl('iframe', { cls: 'wmc-login-frame' });
-      frame.setAttr('src', 'https://weread.qq.com/');
-      status.setText('内嵌窗口不可用，已退化为基础模式；若下方空白，请更新 Obsidian 到最新版后重试');
-    }
-    this.loginPolling = true;
-    modal.open();
-
-    // 手动兜底：探测卡住时用户可点这个立刻重试
-    let probeNow: (() => Promise<boolean>) | null = null;
+    const status = box.createDiv({ cls: 'wmc-login-status', text: '正在打开窗口…' });
+    const frameHost = box.createDiv('wmc-login-frame-host');
+    const diag = box.createDiv({ cls: 'wmc-login-diag' });
     const manual = box.createEl('button', { cls: 'wmc-hero-btn', text: '我已经扫码了，立即同步' });
-    manual.addEventListener('click', () => {
-      void (async () => {
-        status.setText('正在检测登录态…');
-        if (probeNow && (await probeNow())) return;
-        status.setText('还没检测到登录态，再等一下或重扫一次');
-      })();
-    });
+    const actions = box.createDiv('wmc-login-actions is-off');
+    const reloadBtn = actions.createEl('button', { cls: 'wmc-login-link', text: '重新加载窗口' });
+    const browserBtn = actions.createEl('button', { cls: 'wmc-login-link', text: '在浏览器里打开' });
 
+    let wv: WebviewElement | null = null;
+    let baseline = ''; // 打开那一刻的 cookie 快照：用来区分「旧登录态」和「这次扫码」
+    let baselineTaken = false;
+    let ready = false;
     let finished = false;
-    const finish = async (): Promise<boolean> => {
-      if (finished) return true;
-      let ok = false;
-      // ① webview 内直接读 document.cookie —— 最可靠，能拿到 wr_skey/wr_vid/wr_gid
-      if (wv && typeof wv.executeJavaScript === 'function') {
-        try {
-          const raw = await wv.executeJavaScript('document.cookie');
-          const str = typeof raw === 'string' ? raw : '';
-          if (/wr_skey=/.test(str) && /wr_vid=/.test(str)) {
-            this.settings.cookie = normalizeCookie(str);
-            this.settings.useSession = false;
-            ok = true;
-          }
-        } catch {
-          /* 页面还没加载完，下次再试 */
-        }
-      }
-      // ② 老环境能直接读 cookie
-      if (!ok) {
-        const ck = await this.tryReadSessionCookie();
-        if (ck && checkCookie(ck).ok) {
-          this.settings.cookie = normalizeCookie(ck);
-          this.settings.useSession = false;
-          ok = true;
-        }
-      }
-      // ③ 最后兜底：session 探测
-      if (!ok && (await this.probeSessionLogin())) {
-        this.settings.useSession = true;
-        ok = true;
-      }
-      if (!ok) return false;
+    let lastLiveProbe = 0;
+    const timers: number[] = [];
 
+    const showDiag = (msg: string): void => {
+      diag.setText(msg);
+      diag.addClass('is-on');
+      actions.removeClass('is-off');
+    };
+
+    this.loginPolling = true;
+    modal.open(); // 顺序关键：先把 modal 挂进文档，再把 webview 挂进已挂载的 DOM
+
+    function attach(): void {
+      try {
+        const el = createWebviewElement();
+        el.className = 'wmc-login-frame';
+        el.setAttribute('allowpopups', 'false');
+        frameHost.appendChild(el);
+        wv = el;
+      } catch (err) {
+        wv = null;
+        showDiag(`创建 webview 失败：${String(err).slice(0, 120)}`);
+      }
+      const el = wv;
+      if (!el) {
+        status.setText('这个 Obsidian 环境没能创建内嵌窗口。请点「在浏览器里打开」登录后，用设置里的「粘贴 Cookie」。');
+        return;
+      }
+
+      el.addEventListener('dom-ready', () => {
+        ready = true;
+        timers.length = 0;
+        actions.addClass('is-off');
+        status.setText('等待扫码…');
+        void (async () => {
+          if (baselineTaken) {
+            await finish();
+            return;
+          }
+          baselineTaken = true;
+          try {
+            const raw = await el.executeJavaScript('document.cookie');
+            baseline = typeof raw === 'string' ? normalizeCookie(raw) : '';
+          } catch {
+            baseline = '';
+          }
+          // 旧登录态若本来就在、且服务端仍认，直接收工；认不了就留在原地等用户重扫
+          await finish();
+        })();
+      });
+      el.addEventListener('did-navigate', () => void finish());
+      el.addEventListener('did-navigate-in-page', () => void finish());
+      el.addEventListener('did-fail-load', (ev) => {
+        const e = ev as unknown as { errorCode?: number; errorDescription?: string };
+        showDiag(`页面加载失败：${e?.errorCode ?? '?'} ${e?.errorDescription ?? ''}`);
+        status.setText('登录页没加载出来，点「重新加载窗口」再试，或改用浏览器登录后粘贴 Cookie。');
+      });
+
+      // 挂载完成、下一帧再设 src —— 游离状态下设 src 会让部分 Electron 版本渲染白框
+      window.requestAnimationFrame(() => {
+        try {
+          el.setAttribute('src', 'https://weread.qq.com/');
+        } catch (err) {
+          showDiag(`设置登录页地址失败：${String(err).slice(0, 120)}`);
+        }
+      });
+
+      timers.push(
+        window.setTimeout(() => {
+          if (ready) return;
+          showDiag('dom-ready 15 秒未触发：可能是网络被拦，或当前 Obsidian 版本限制 webview 加载第三方站点。');
+          status.setText('内嵌窗口还没加载出来。可以先点「在浏览器里打开」，或点「重新加载窗口」。');
+        }, 15000),
+      );
+    }
+
+    /** 探测一次；只有通过真实接口校验才关窗 */
+    async function finish(): Promise<boolean> {
+      if (finished || !wv) return finished;
+      let raw: unknown = '';
+      try {
+        raw = await wv.executeJavaScript('document.cookie');
+      } catch {
+        return false; // 页面还没加载完
+      }
+      const str = typeof raw === 'string' ? normalizeCookie(raw) : '';
+      const chk = checkCookie(str);
+      if (!str || !chk.ok) {
+        status.setText(`等待扫码…（还缺 ${chk.missing.join('、') || '登录态'}）`);
+        return false;
+      }
+      if (Date.now() - lastLiveProbe < 12000) return false; // 别把接口探针打成每两秒一轮
+      lastLiveProbe = Date.now();
+      const changed = baseline !== '' && str !== baseline;
+
+      self.settings.cookie = str;
+      self.settings.useSession = false;
+      const probe = await self.verifyCookieLive(false).catch(() => null);
+      if (!probe || probe.verdict !== 'ok') {
+        status.setText(
+          changed
+            ? `已拿到 Cookie，但接口还不通（${probe ? probe.hint : '无响应'}）：点「我已经扫码了，立即同步」重试`
+            : '检测到一份旧登录态，但接口已经不通 —— 请在下方扫码刷新',
+        );
+        return false;
+      }
+      return succeed();
+    }
+
+    async function succeed(): Promise<boolean> {
       finished = true;
-      this.loginPolling = false;
+      self.loginPolling = false;
+      timers.length = 0;
       status.setText('登录成功，正在同步…');
       try {
-        modal.close(); // 先关窗，用户在设置页就能看到信息卡刷新
+        modal.close();
       } catch {
         /* 用户已手动关闭 */
       }
-      const key = await this.refreshApiKey().catch(() => null);
-      const prof = await this.refreshProfile().catch(() => null);
-      const n = await this.syncAccountsFromShelf().catch(() => 0);
-      const web = await this.checkWebLogin().catch(() => ({ ok: false, msg: '未知' }));
-      this.notifyViews();
-      this.renderStatus();
-      this.emitWatch();
+      const key = await self.refreshApiKey().catch(() => null);
+      const prof = await self.refreshProfile().catch(() => null);
+      const n = await self.syncAccountsFromShelf().catch(() => 0);
+      const web = await self.checkWebLogin().catch(() => ({ ok: false, msg: '未知' }));
+      self.notifyViews();
+      self.renderStatus();
+      self.emitWatch();
       new Notice(
         `登录成功${prof?.name ? `：${prof.name}` : ''}${key ? ' · 已换出官方 Key' : ''}${
           n ? ` · 书架 ${n} 个` : ''
@@ -1131,33 +1215,60 @@ export default class WereadMpCatcher extends Plugin {
         web.ok ? 10000 : 16000,
       );
       return true;
-    };
-    probeNow = finish;
-
-    // 微信读书登录成功后会跳转页面 → iframe 触发 load，立刻探测一次
-    if (wv && typeof wv.addEventListener === 'function') {
-      wv.addEventListener('dom-ready', () => {
-        void finish();
-      });
-      wv.addEventListener('did-navigate', () => {
-        void finish();
-      });
-      wv.addEventListener('did-navigate-in-page', () => {
-        void finish();
-      });
     }
+
+    reloadBtn.addEventListener('click', () => {
+      if (!wv) {
+        attach();
+        return;
+      }
+      ready = false;
+      baselineTaken = false;
+      baseline = '';
+      lastLiveProbe = 0;
+      status.setText('正在重新加载…');
+      try {
+        wv.setAttribute('src', `https://weread.qq.com/?t=${Date.now()}`);
+      } catch {
+        /* noop */
+      }
+    });
+
+    browserBtn.addEventListener('click', () => {
+      window.open('https://weread.qq.com/', '_blank');
+      new Notice('已在浏览器打开：扫码登录后，把浏览器里的 Cookie 粘贴到插件设置即可完成登录', 12000);
+    });
+
+    manual.addEventListener('click', () => {
+      void (async () => {
+        status.setText('正在检测登录态…');
+        lastLiveProbe = 0; // 手动点 = 用户要求立刻探，绕过节流
+        if (await finish()) return;
+        status.setText('还没检测到有效登录态，再等一下或重扫一次');
+      })();
+    });
+
+    modal.onClose = () => {
+      finished = true;
+      self.loginPolling = false;
+      timers.length = 0;
+      if (self.loginModal === modal) self.loginModal = null;
+    };
+
+    attach();
 
     void (async () => {
       const t0 = Date.now();
       let tries = 0;
-      while (this.loginPolling && Date.now() - t0 < 6 * 60 * 1000) {
+      while (self.loginPolling && !finished && Date.now() - t0 < 6 * 60 * 1000) {
         await sleep(1800);
         tries++;
         if (finished) return;
-        if (tries % 3 === 0) status.setText(`等待扫码…（已检测 ${tries} 次，登录后会自动关闭）`);
+        if (tries % 3 === 0 && ready) status.setText(`等待扫码…（已检测 ${tries} 次，登录后会自动关闭）`);
         if (await finish()) return;
       }
-      this.loginPolling = false;
+      if (finished) return;
+      self.loginPolling = false;
       try {
         modal.close();
       } catch {
