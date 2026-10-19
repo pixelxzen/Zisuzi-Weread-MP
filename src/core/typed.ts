@@ -41,15 +41,33 @@ export interface CookieItem {
   domain?: string;
 }
 
+/**
+ * cookies.get 的过滤条件。
+ * 必须优先用 url：url 过滤返回「该 URL 的请求会带上的全部 cookie」——
+ * 含 HttpOnly（如 weread 的 wr_skey/wr_rt）与 host-only cookie（Set-Cookie 未带 Domain 的）；
+ * domain 过滤只匹配「域名相等或是其子域」，会漏掉 host-only cookie（踩过坑）。
+ */
+export interface CookieFilter {
+  url?: string;
+  domain?: string;
+}
+
 export interface SessionLike {
   cookies?: {
-    get?: (filter: { domain?: string }) => Promise<CookieItem[] | undefined>;
+    get?: (filter: CookieFilter) => Promise<CookieItem[] | undefined>;
   };
   clearStorageData?: (opts: Record<string, unknown>) => Promise<void>;
 }
 
+export interface WebContentsLike {
+  session?: SessionLike;
+}
+
 export interface ElectronModule {
-  remote?: { session?: { defaultSession?: SessionLike } };
+  remote?: {
+    session?: { defaultSession?: SessionLike };
+    webContents?: { fromId?: (id: number) => WebContentsLike | null };
+  };
 }
 
 /** 运行时可用的 node require（Electron 注入；沙箱/移动端可能没有） */
@@ -94,6 +112,8 @@ type WebviewEvent = 'dom-ready' | 'did-navigate' | 'did-navigate-in-page';
 
 export interface WebviewElement extends HTMLElement {
   executeJavaScript(code: string): Promise<unknown>;
+  /** 取 webview 宿主 WebContents 的 id，用于 remote.webContents.fromId() 直读其 session（含 HttpOnly cookie） */
+  getWebContentsId?: () => number;
   addEventListener(type: WebviewEvent, cb: () => void): void;
   addEventListener(type: string, cb: (ev: Event) => void): void;
 }

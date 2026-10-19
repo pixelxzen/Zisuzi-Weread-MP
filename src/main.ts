@@ -631,8 +631,35 @@ export default class WereadMpCatcher extends Plugin {
       // 运行时按需加载 electron 模块：静态 import 会在移动端直接崩
       const cookies = electronModule()?.remote?.session?.defaultSession?.cookies;
       if (!cookies?.get) return null;
-      const list = await cookies.get({ domain: '.weread.qq.com' });
-      if (!list?.length) return null;
+      // 必须用 url 过滤：weread 的 wr_vid/wr_skey 是 host-only cookie，
+      // domain 过滤 '.weread.qq.com' 匹配不到它们（只返回域 cookie，如 wr_gid），
+      // 导致 checkCookie 缺项；url 过滤返回该 URL 请求会带上的全部 cookie（含 HttpOnly）。
+      const list = (await cookies.get({ url: 'https://weread.qq.com/' })) ?? [];
+      if (list.length) return list.map((c) => `${c.name}=${c.value}`).join('; ');
+      // 兜底：个别环境 url 过滤不可用时退回 domain 过滤
+      const list2 = (await cookies.get({ domain: '.weread.qq.com' })) ?? [];
+      if (!list2.length) return null;
+      return list2.map((c) => `${c.name}=${c.value}`).join('; ');
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * 从 webview 自己的 WebContents session 读 cookie。
+   * webview 未设 partition 时本就共享 app defaultSession（Electron 官方规范），
+   * 但走 getWebContentsId → remote.webContents.fromId 直读更稳：
+   * 不依赖 session 共享假设，且拿到的就是该 webview 的真实登录态（含 HttpOnly cookie）。
+   */
+  private async readWebviewSessionCookie(wv: WebviewElement): Promise<string | null> {
+    try {
+      const id = wv.getWebContentsId?.();
+      if (id == null) return null;
+      const wc = electronModule()?.remote?.webContents?.fromId?.(id);
+      const cookies = wc?.session?.cookies;
+      if (!cookies?.get) return null;
+      const list = (await cookies.get({ url: 'https://weread.qq.com/' })) ?? [];
+      if (!list.length) return null;
       return list.map((c) => `${c.name}=${c.value}`).join('; ');
     } catch {
       return null;
@@ -1079,21 +1106,19 @@ export default class WereadMpCatcher extends Plugin {
     const finish = async (): Promise<boolean> => {
       if (finished) return true;
       let ok = false;
-      // ① webview 内直接读 document.cookie —— 最可靠，能拿到 wr_skey/wr_vid/wr_gid
-      if (wv && typeof wv.executeJavaScript === 'function') {
-        try {
-          const raw = await wv.executeJavaScript('document.cookie');
-          const str = typeof raw === 'string' ? raw : '';
-          if (/wr_skey=/.test(str) && /wr_vid=/.test(str)) {
-            this.settings.cookie = normalizeCookie(str);
-            this.settings.useSession = false;
-            ok = true;
-          }
-        } catch {
-          /* 页面还没加载完，下次再试 */
+      // ① webview 自己的 WebContents session 直读 —— 最可靠：
+      //    cookies.get 的 url 过滤返回该 URL 请求会带上的全部 cookie，
+      //    HttpOnly 的 wr_skey/wr_rt 和 host-only 的 wr_vid/wr_gid 都能拿到
+      //    （document.cookie 看不到 HttpOnly；domain 过滤 '.weread.qq.com' 会漏 host-only，都踩过坑）
+      if (wv) {
+        const ck = await this.readWebviewSessionCookie(wv);
+        if (ck && checkCookie(ck).ok) {
+          this.settings.cookie = normalizeCookie(ck);
+          this.settings.useSession = false;
+          ok = true;
         }
       }
-      // ② 老环境能直接读 cookie
+      // ② defaultSession（webview 未设 partition 时本来就是 default session，双保险）
       if (!ok) {
         const ck = await this.tryReadSessionCookie();
         if (ck && checkCookie(ck).ok) {
@@ -1102,7 +1127,23 @@ export default class WereadMpCatcher extends Plugin {
           ok = true;
         }
       }
-      // ③ 最后兜底：session 探测
+      // ③ 页面上下文 document.cookie：非 HttpOnly 才可见，极端环境兜底；
+      //    必须过 checkCookie 四项校验——只正则匹配 wr_skey/wr_vid 就存，
+      //    会把缺 wr_rt/wr_gid 的残cookie 写进设置，之后一抓就报 -2012
+      if (!ok && wv && typeof wv.executeJavaScript === 'function') {
+        try {
+          const raw = await wv.executeJavaScript('document.cookie');
+          const str = typeof raw === 'string' ? raw : '';
+          if (str && checkCookie(str).ok) {
+            this.settings.cookie = normalizeCookie(str);
+            this.settings.useSession = false;
+            ok = true;
+          }
+        } catch {
+          /* 页面还没加载完，下次再试 */
+        }
+      }
+      // ④ 最后兜底：session 探测
       if (!ok && (await this.probeSessionLogin())) {
         this.settings.useSession = true;
         ok = true;
