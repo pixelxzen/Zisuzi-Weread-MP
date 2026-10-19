@@ -196,6 +196,12 @@ npm test         # 核心逻辑单测（需先构建 dist/core）
 - 交互与阅读面范式参考 [`joeseesun/qiaomu-ai-rss`](https://github.com/joeseesun/qiaomu-ai-rss)（GPL-3.0-only）
 - 微信读书接口实践参考 [`zhaohongxuan/obsidian-weread-plugin`](https://github.com/zhaohongxuan/obsidian-weread-plugin)（MIT）
 
+## Star History
+
+<a href="https://star-history.com/#pixelxzen/Zisuzi-Weread-MP&Date">
+  <img src="https://api.star-history.com/svg?repos=pixelxzen/Zisuzi-Weread-MP&type=Date" alt="Star History Chart" width="720" />
+</a>
+
 ## License
 
 **GPL-3.0-only**

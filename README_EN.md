@@ -193,6 +193,12 @@ Outputs `main.js` / `manifest.json` / `styles.css` at the repo root. Architectur
 - Interaction and reading-surface patterns inspired by [`joeseesun/qiaomu-ai-rss`](https://github.com/joeseesun/qiaomu-ai-rss) (GPL-3.0-only)
 - WeRead API practice informed by [`zhaohongxuan/obsidian-weread-plugin`](https://github.com/zhaohongxuan/obsidian-weread-plugin) (MIT)
 
+## Star History
+
+<a href="https://star-history.com/#pixelxzen/Zisuzi-Weread-MP&Date">
+  <img src="https://api.star-history.com/svg?repos=pixelxzen/Zisuzi-Weread-MP&type=Date" alt="Star History Chart" width="720" />
+</a>
+
 ## License
 
 **GPL-3.0-only**
