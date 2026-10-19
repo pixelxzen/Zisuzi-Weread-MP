@@ -1153,12 +1153,7 @@ export default class WereadMpCatcher extends Plugin {
             return;
           }
           baselineTaken = true;
-          try {
-            const raw = await el.executeJavaScript('document.cookie');
-            baseline = typeof raw === 'string' ? normalizeCookie(raw) : '';
-          } catch {
-            baseline = '';
-          }
+          baseline = await collectCookie();
           // 首页不会自己弹二维码：cookie 不全时先把登录面板点开
           if (!checkCookie(normalizeCookie(baseline)).ok) {
             const ok = await openLoginPanel();
@@ -1195,15 +1190,24 @@ export default class WereadMpCatcher extends Plugin {
     }
 
     /** 探测一次；只有通过真实接口校验才关窗 */
+    /** document.cookie + cookie 库合并：HttpOnly 的三个键只能从库里拿到 */
+    async function collectCookie(): Promise<string> {
+      let fromJs = '';
+      try {
+        const raw = await wv?.executeJavaScript('document.cookie');
+        fromJs = typeof raw === 'string' ? raw : '';
+      } catch {
+        /* 页面还没加载完 */
+      }
+      const fromStore = (await self.readCookiesFromStore().catch(() => null)) || '';
+      if (!fromStore) return normalizeCookie(fromJs);
+      if (!fromJs) return normalizeCookie(fromStore);
+      return normalizeCookie(self.mergeCookies(fromStore, fromJs));
+    }
+
     async function finish(): Promise<boolean> {
       if (finished || !wv) return finished;
-      let raw: unknown = '';
-      try {
-        raw = await wv.executeJavaScript('document.cookie');
-      } catch {
-        return false; // 页面还没加载完
-      }
-      const str = typeof raw === 'string' ? normalizeCookie(raw) : '';
+      const str = await collectCookie();
       const chk = checkCookie(str);
       if (!str || !chk.ok) {
         status.setText(`等待扫码…（还缺 ${chk.missing.join('、') || '登录态'}）`);
@@ -1451,6 +1455,110 @@ export default class WereadMpCatcher extends Plugin {
       );
     }
     return probe;
+  }
+
+  /**
+   * 从 Obsidian 自己的 Chromium cookie 库里读微信读书登录态。
+   *
+   * 为什么必须这么干（2026-10-19 实测）：`wr_vid` / `wr_skey` / `wr_rt` 在
+   * `~/Library/Application Support/obsidian/Cookies` 里 `is_httponly = 1`，
+   * 页面里的 `document.cookie` **永远看不到它们** —— 于是扫码窗口「明明已经登录」，
+   * 状态行还在说「还缺 wr_vid、wr_skey、wr_rt」。这不是检测慢，是通道根本取不到。
+   *
+   * Obsidian 把 cookie 值以明文存在 `value` 列（实测 length(value) 7/8/28），
+   * 所以只读查询即可，不需要解密。只取 weread 域几个键，查完删临时副本。
+   */
+  private async readCookiesFromStore(): Promise<string | null> {
+    const os = nodeOs();
+    const cp = childProcessModule();
+    const req = nodeRequire();
+    if (!os?.homedir || !cp?.spawn || !req) return null;
+    const src = this.cookieDbPath();
+    if (!src) return null;
+
+    type FsLike = {
+      existsSync?: (p: string) => boolean;
+      copyFileSync?: (a: string, b: string) => void;
+      unlinkSync?: (p: string) => void;
+    };
+    let fs: FsLike | null = null;
+    try {
+      fs = req<FsLike>('fs');
+    } catch {
+      return null;
+    }
+    if (!fs?.existsSync?.(src)) return null;
+
+    // 运行中的 Obsidian 会锁库：先复制一份（连 -wal 一起，否则读到旧快照）再查
+    const tmp = `${src}.wmc-${Date.now()}.db`;
+    try {
+      fs.copyFileSync?.(src, tmp);
+      if (fs.existsSync(`${src}-wal`)) fs.copyFileSync?.(`${src}-wal`, `${tmp}-wal`);
+    } catch {
+      return null;
+    }
+
+    const platform = (window as unknown as { process?: { platform?: string } }).process?.platform ?? '';
+    const sqlite = platform === 'darwin' ? '/usr/bin/sqlite3' : 'sqlite3';
+    const sql =
+      "SELECT name||'='||value FROM cookies WHERE host_key IN ('.weread.qq.com','weread.qq.com') " +
+      "AND length(value) > 0 AND name IN ('wr_vid','wr_skey','wr_rt','wr_gid','wr_ql','wr_fp','wr_localvid','wr_name','wr_avatar');";
+
+    const out = await new Promise<string>((resolve) => {
+      let buf = '';
+      try {
+        const child = cp.spawn?.(sqlite, ['-readonly', tmp, sql], { stdio: ['ignore', 'pipe', 'ignore'] });
+        if (!child) {
+          resolve('');
+          return;
+        }
+        child.stdout?.on('data', (c) => {
+          buf += c.toString();
+        });
+        child.on('error', () => resolve(''));
+        child.on('close', () => resolve(buf));
+      } catch {
+        resolve('');
+      }
+    });
+
+    try {
+      fs.unlinkSync?.(tmp);
+      if (fs.existsSync(`${tmp}-wal`)) fs.unlinkSync?.(`${tmp}-wal`);
+    } catch {
+      /* 清理失败不影响结果 */
+    }
+
+    const parts = out
+      .split('\n')
+      .map((l) => l.trim())
+      .filter(Boolean);
+    if (!parts.length) return null;
+    return normalizeCookie(parts.join('; '));
+  }
+
+  /** Chromium cookie 库按平台的标准位置 */
+  private cookieDbPath(): string | null {
+    const home = nodeOs()?.homedir?.();
+    if (!home) return null;
+    const proc = (window as unknown as { process?: { platform?: string; env?: Record<string, string> } }).process;
+    const p = proc?.platform ?? '';
+    if (p === 'darwin') return `${home}/Library/Application Support/obsidian/Cookies`;
+    if (p === 'win32') return `${proc?.env?.APPDATA ?? ''}/obsidian/Cookies`;
+    return `${home}/.config/obsidian/Cookies`;
+  }
+
+  /** over 里有的键覆盖 base，其余保留（页面上能看到的优先，HttpOnly 的用库里的补） */
+  private mergeCookies(base: string, over: string): string {
+    const map = new Map<string, string>();
+    for (const part of `${base}; ${over}`.split(';')) {
+      const i = part.indexOf('=');
+      if (i <= 0) continue;
+      const k = part.slice(0, i).trim();
+      const v = part.slice(i + 1).trim();
+      if (k) map.set(k, v);
+    }
+    return [...map].map(([k, v]) => `${k}=${v}`).join('; ');
   }
 
   loginState(): 'none' | 'cookie' | 'full' {

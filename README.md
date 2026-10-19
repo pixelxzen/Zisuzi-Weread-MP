@@ -166,6 +166,7 @@ flowchart LR
 | 你的本机 CLI | 仅在启用「本地 Agent」并主动点击时调用，默认关闭 |
 
 - 登录凭据以明文保存在 `<库>/.obsidian/plugins/zisuzi-weread-mp/data.json`，**请勿把这个文件同步到公共位置**；退出登录会清空它。
+- 扫码登录时，插件会读一次 Obsidian 自己的 Chromium cookie 库（macOS: `~/Library/Application Support/obsidian/Cookies`），**只取 `weread.qq.com` 域的几个登录字段**，读完立刻删掉临时副本、不写盘、不上传。这么做的原因：`wr_vid` / `wr_skey` / `wr_rt` 是 HttpOnly，页面里的 `document.cookie` 读不到（否则扫码窗口会一直显示「还缺 wr_vid、wr_skey、wr_rt」）。Windows 上如果该库是加密的，插件读不到，会退回「手动粘贴 Cookie」。
 - 使用「AI 处理」时，**文章正文会发送到你自己填的模型端点**。该功能默认关闭，需要你显式开启并填 Key。
 - 「本地 Agent」默认关闭，只在点击时启动本机命令行进程。
 

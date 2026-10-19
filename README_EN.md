@@ -162,6 +162,7 @@ The plugin only contacts the hosts below. No telemetry, no analytics, no remote 
 | Your local CLI | Only when you enable and trigger the local agent; off by default |
 
 - Credentials are stored in plain text in `<vault>/.obsidian/plugins/zisuzi-weread-mp/data.json`. **Never sync that file to a public location.** "Sign out" clears it.
+- During QR login the plugin reads Obsidian's own Chromium cookie store once (macOS: `~/Library/Application Support/obsidian/Cookies`), taking **only a few `weread.qq.com` login fields**, and deletes the temporary copy immediately — nothing is written to disk or uploaded. Reason: `wr_vid` / `wr_skey` / `wr_rt` are HttpOnly and therefore invisible to `document.cookie`, so the login window would otherwise keep reporting them as missing. On Windows, if that store is encrypted, the plugin falls back to manual cookie paste.
 - With AI processing enabled, **the article body is sent to the endpoint you configured**. Off by default, requires your explicit opt-in and key.
 - The local agent is off by default and only spawns a CLI process when you click.
 
