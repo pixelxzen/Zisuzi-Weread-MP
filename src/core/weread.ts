@@ -25,7 +25,7 @@ export interface HttpResp {
 
 export type HttpFn = (url: string, headers: Record<string, string>) => Promise<HttpResp>;
 
-export const RISK_CODES = [-2010, -2012, -2041];
+export const RISK_CODES = [-2010, -2012, -2014, -2041];
 
 export class RiskError extends Error {
   constructor(public code: number, message: string) {
@@ -34,8 +34,29 @@ export class RiskError extends Error {
   }
 }
 
-export const WEREAD_UA =
+const UA_WINDOWS =
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
+const UA_MAC =
   'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
+
+/** 按运行平台选 UA：Windows 上伪装 macOS 在微信读书侧是不自然的信号 */
+function pickUa(): string {
+  try {
+    const p = (globalThis as { process?: { platform?: string } }).process;
+    if (p?.platform === 'win32') return UA_WINDOWS;
+    if (p?.platform) return UA_MAC;
+  } catch {
+    /* noop */
+  }
+  try {
+    if (typeof navigator !== 'undefined' && /^Win/i.test(navigator.platform)) return UA_WINDOWS;
+  } catch {
+    /* noop */
+  }
+  return UA_MAC;
+}
+
+export const WEREAD_UA = pickUa();
 
 /** 用户粘贴的 cookie 串 → 规范化 header 值 */
 export function normalizeCookie(raw: string): string {
@@ -179,6 +200,8 @@ export function describeRisk(code: number, what = ''): string {
       return `${pre}未登录（cookie 缺失或已失效）(-2010)`;
     case -2012:
       return `${pre}登录态过期，需重新扫码 (-2012)`;
+    case -2014:
+      return `${pre}请求频率过高 (-2014)：服务端限频，登录态没有问题；等 5~15 分钟再抓，并把抓取间隔调大`;
     case -2041:
       return `${pre}公众号接口对该账号受限 (-2041)：登录态本身有效，可在手机 App 打开一次公众号解除，或等数小时冷却`;
     default:
@@ -202,7 +225,7 @@ export interface AccessProbe {
   account: string | null;
   listOk: boolean;
   listCode: number;
-  verdict: 'ok' | 'no-cookie' | 'expired' | 'restricted' | 'unknown';
+  verdict: 'ok' | 'no-cookie' | 'expired' | 'rate-limited' | 'restricted' | 'unknown';
   hint: string;
 }
 
@@ -273,6 +296,11 @@ export async function probeAccess(http: HttpFn, cookie: string, bookId = 'mpbook
   if (!out.account) {
     out.verdict = 'expired';
     out.hint = '登录态已失效，重新扫码即可';
+    return out;
+  }
+  if (out.listCode === -2014) {
+    out.verdict = 'rate-limited';
+    out.hint = '登录态有效（能看到账号昵称），只是请求太密被限频 (-2014)：停 5~15 分钟再抓，并把抓取间隔调大';
     return out;
   }
   if (out.listCode === -2041) {
@@ -406,4 +434,62 @@ export class WereadClient {
     if (r.status !== 200) throw new Error(`图片 HTTP ${r.status}`);
     return r.bytes;
   }
+}
+
+/* ------------------------------- 链接工具 ------------------------------- */
+
+/**
+ * 关于「给人读的文章页」，实测结论（2026-10-19）：
+ *
+ *   GET /web/mp/<reviewId>          → 404
+ *   GET /web/mp/content?reviewId=   → 200，但 Content-Type: text/plain，
+ *                                     浏览器把整篇 HTML 当纯文本显示（2.7MB 源码），
+ *                                     未登录时是 {"errCode":-2010} JSON
+ *   GET /web/mp/reader/<anything>   → 200 外壳，但只请求 /web/user，不加载正文，
+ *                                     直接渲染成「加载失败，请点击重试」
+ *
+ * 也就是说 `mpReader` 是 SPA 内部路由，必须从列表页点进去（数据在内存 store 里），
+ * **不存在可以从外部直接打开的文章页**。所以插件不再生成微信读书的文章链接，
+ * 只提供正文里 og:url 给出的公众号原文地址（见 extractMpOriginalUrl）。
+ */
+
+/**
+ * 从正文 HTML 里捞公众号原文链接。
+ *
+ * 微信文章 HTML 的 `<meta property="og:url">` 里带着正文自己的公众号地址，
+ * 这是**唯一**能在微信里直接打开的链接。实测每篇都有，形如：
+ *   https://mp.weixin.qq.com/s?__biz=MzIz...&mid=...&idx=1&sn=...&chksm=...#rd
+ *
+ * 注意：微信读书的 `/web/mp/content?reviewId=` 是接口，响应
+ * `Content-Type: text/plain`，浏览器打开只会把 HTML 源码当文本显示，
+ * 不能作为「给人读」的链接使用。
+ */
+export function extractMpOriginalUrl(html: string): string {
+  const norm = (u: string) => {
+    const s = u
+      .replace(/&amp;/g, '&')
+      .replace(/&#0?38;/g, '&')
+      .replace(/[),.;]+$/, '')
+      .replace(/#rd$/i, '')
+      .trim();
+    // 正文里还有一段内联 JS 模板：
+    //   https://mp.weixin.qq.com/s?__biz=${window.biz}&mid=${window.mid}...
+    // 它不是真实地址，抓到会生成一条打不开的假链接，必须排除。
+    if (s.includes('${') || /window\.(biz|mid|idx|sn|source)/.test(s)) return '';
+    return s;
+  };
+
+  // 首选 og:url（属性顺序两种都覆盖）
+  const og =
+    /<meta[^>]+property=["']og:url["'][^>]*content=["']([^"']+)["']/i.exec(html) ||
+    /<meta[^>]+content=["']([^"']+)["'][^>]*property=["']og:url["']/i.exec(html);
+  if (og && /mp\.weixin\.qq\.com/i.test(og[1])) {
+    const u = norm(og[1]);
+    if (u) return u;
+  }
+
+  // 兜底：正文里出现的公众号文章地址（/s?__biz= 或 /s/<token>），排除模板串
+  const m = /https?:\/\/mp\.weixin\.qq\.com\/s(?:\?|\/)[^"'\s<>\\]*/i.exec(html);
+  if (!m) return '';
+  return norm(m[0]);
 }

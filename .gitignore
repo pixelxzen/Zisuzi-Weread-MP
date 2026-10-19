@@ -14,3 +14,6 @@ skills-lock.json
 
 # 宣传片构建产物（依赖 /tmp 中间文件，不进仓库）
 docs/promo-video-v5/
+
+# 本地构建目录（部署直接 cp main.js，不再保留副本）
+build/

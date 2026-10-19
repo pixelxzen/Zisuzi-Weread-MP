@@ -50,19 +50,32 @@ export function decodeEntities(s: string): string {
 
 /** 抽取指定 id 的 div 内部 HTML（按 div 深度平衡，不依赖 DOM） */
 export function extractById(html: string, id = 'js_content'): string {
-  const open = new RegExp(`<div[^>]*\\bid=["']${id}["'][^>]*>`, 'i');
-  const m = open.exec(html);
-  if (!m) return '';
-  const start = m.index + m[0].length;
+  const open = new RegExp(`<div[^>]*\\bid=["']${id}["'][^>]*>`, 'gi');
   const tag = /<(\/?)div\b[^>]*>/gi;
-  tag.lastIndex = start;
-  let depth = 1;
-  let tm: RegExpExecArray | null;
-  while ((tm = tag.exec(html))) {
-    depth += tm[1] ? -1 : 1;
-    if (depth === 0) return html.slice(start, tm.index);
+  let best = '';
+  let m: RegExpExecArray | null;
+  while ((m = open.exec(html))) {
+    // 微信页面里还有一批「同名 id」的装饰性容器，比如
+    //   <div id="js_content" class="share_notice_wrp">（分享提示，里面没有正文）
+    // 只取第一个会让整篇正文变成空。这里把所有同名容器都切出来，取最长的那个。
+    if (/share_notice|wx_tip|js_preview_tip/i.test(m[0])) continue;
+    const start = m.index + m[0].length;
+    tag.lastIndex = start;
+    let depth = 1;
+    let end = html.length;
+    let tm: RegExpExecArray | null;
+    while ((tm = tag.exec(html))) {
+      depth += tm[1] ? -1 : 1;
+      if (depth === 0) {
+        end = tm.index;
+        break;
+      }
+    }
+    const inner = html.slice(start, end);
+    if (inner.length > best.length) best = inner;
+    open.lastIndex = Math.max(open.lastIndex, start);
   }
-  return html.slice(start);
+  return best;
 }
 
 /** 去掉 script/style/注释与内联事件 */
@@ -71,6 +84,54 @@ function stripJunk(html: string): string {
     .replace(/<script[\s\S]*?<\/script>/gi, '')
     .replace(/<style[\s\S]*?<\/style>/gi, '')
     .replace(/<!--[\s\S]*?-->/g, '');
+}
+
+/**
+ * 解码内联 JS 字符串里的转义（微信把正文塞进 window.__ 数据时用 \x0a 表示换行）
+ */
+export function decodeJsString(s: string): string {
+  return s
+    .replace(/\\x([0-9a-f]{2})/gi, (_m: string, h: string) => String.fromCharCode(parseInt(h, 16)))
+    .replace(/\\u([0-9a-f]{4})/gi, (_m: string, h: string) => String.fromCharCode(parseInt(h, 16)))
+    .replace(/\\n/g, '\n')
+    .replace(/\\r/g, '')
+    .replace(/\\t/g, '\t')
+    .replace(/\\'/g, "'")
+    .replace(/\\"/g, '"')
+    .replace(/\\\\/g, '\\');
+}
+
+/**
+ * 兜底：有些文章（视频号/图片笔记/部分客户端渲染的图文）返回的页面里根本没有
+ * `<div id="js_content">`，正文只存在于内联 JS 的 `content_noencode` 字段里。
+ * 实测 2026-10 有约 1/3 的文章属于这种情况，不兜底就会整篇抓空。
+ */
+export function extractNoencodeText(html: string): string {
+  const pats = [
+    /content_noencode\s*:\s*'((?:\\[\s\S]|[^'\\])*)'/g,
+    /content_noencode\s*:\s*"((?:\\[\s\S]|[^"\\])*)"/g,
+  ];
+  let best = '';
+  for (const re of pats) {
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(html))) {
+      if (m[1].length > best.length) best = m[1];
+    }
+  }
+  if (!best) return '';
+  return decodeJsString(best)
+    .replace(/<br\s*\/?>/gi, '\n')
+    .replace(/<[^>]+>/g, '')
+    .trim();
+}
+
+/** 纯文本 → Markdown：按空行分段，行内多余空白压平 */
+function textToMarkdown(text: string): string {
+  return decodeEntities(text)
+    .split(/\n\s*\n/)
+    .map((p) => p.replace(/[ \t]+/g, ' ').replace(/\n+/g, ' ').trim())
+    .filter(Boolean)
+    .join('\n\n');
 }
 
 function inlineToMd(s: string): string {
@@ -135,7 +196,11 @@ export function extractVideoUrls(html: string): Map<string, string> {
 
 export function htmlToMarkdown(html: string): ConvertResult {
   const body = extractById(stripJunk(html));
-  if (!body) return { markdown: '', images: [], media: [] };
+  if (!body) {
+    // 没有 js_content：正文在内联 JS 的 content_noencode 里（视频号/图片笔记常见）
+    const t = extractNoencodeText(html);
+    return { markdown: t ? textToMarkdown(t) : '', images: [], media: [] };
+  }
 
   const images: ImageRef[] = [];
   const media: MediaRef[] = [];
@@ -216,12 +281,18 @@ export function htmlToMarkdown(html: string): ConvertResult {
   text = decodeEntities(text);
 
   // 清理
-  const markdown = text
+  let markdown = text
     .split('\n')
     .map((l) => l.replace(/[ \t]+$/g, ''))
     .join('\n')
     .replace(/\n{3,}/g, '\n\n')
     .trim();
+
+  // js_content 是个空壳（只有分享提示之类）时，再退回 content_noencode
+  if (!markdown) {
+    const t = extractNoencodeText(html);
+    if (t) markdown = textToMarkdown(t);
+  }
 
   return { markdown, images, media };
 }

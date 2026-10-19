@@ -1,6 +1,6 @@
 {
-  "name": "zisuzi-weread-mp",
-  "version": "4.4.4",
+  "name": "weread-mp-fork",
+  "version": "4.4.9",
   "description": "Archive WeChat Official Account articles from your WeRead shelf as local Markdown notes.",
   "main": "main.js",
   "type": "module",
@@ -36,5 +36,8 @@
     "obsidian": "latest",
     "typescript": "^5.8.3",
     "typescript-eslint": "^8.71.2"
+  },
+  "dependencies": {
+    "qrcode-generator": "^2.0.4"
   }
 }

@@ -1,9 +1,9 @@
 import {
   App,
-  Modal,
   Notice,
   Plugin,
   PluginSettingTab,
+  Setting,
   TFile,
   TFolder,
   type TAbstractFile,
@@ -24,15 +24,17 @@ import {
   type ArticleItem,
   type HttpFn,
   RiskError,
+  WEREAD_UA,
+  extractMpOriginalUrl,
 } from './core/weread';
 import { htmlToMarkdown, replaceImagePlaceholders, replaceMediaPlaceholders, safeFileName } from './core/html2md';
 import { WmcView, VIEW_TYPE_WMC } from './host/view-linear';
 import { BackfillModal } from './host/backfill-modal';
+import { QrLoginModal } from './host/qr-login-modal';
 import { ASSET_AVATAR, ASSET_MP_QR, ASSET_TIP_QR } from './core/assets';
 import type { BfItem, BfProgress, BfResult } from './core/bf';
 import {
   childProcessModule,
-  createWebviewElement,
   electronModule,
   isArr,
   isObj,
@@ -42,12 +44,12 @@ import {
   pickArr,
   pickNum,
   pickObj,
+  platformName,
   processEnv,
   vaultBasePath,
   type CliChild,
   type CdpTarget,
   type CookieItem,
-  type WebviewElement,
 } from './core/typed';
 import { WereadAgentApi, fetchApiKey } from './core/weread-api';
 import {
@@ -102,6 +104,13 @@ export interface WMSettings {
   intervalMin: number;
   maxPerRun: number;
   maxPerAccount: number;
+  /** 每轮最多检查多少个公众号的列表（按游标轮转，防止一次把全量号都拉一遍） */
+  maxAccountsPerRun: number;
+  /**
+   * 防风控保护。开启时每次启动都会把速率参数收敛到实测安全档，
+   * 不受旧配置或手动误调影响。设为 false 才允许自由调参。
+   */
+  rateSafeMode?: boolean;
   delayListMs: number;
   delayContentMs: number;
   downloadImages: boolean;
@@ -124,6 +133,10 @@ interface DiscoveredEntry {
   likeNum?: number;
   picUrl?: string;
   localCover?: string;
+  /** 列表接口自带的摘要。图片类文章（小绿书）没有 js_content，这是唯一正文线索 */
+  digest?: string;
+  /** 公众号原文地址（从正文 og:url 提取），抓过正文后才有 */
+  mpUrl?: string;
 }
 
 interface WMState {
@@ -137,6 +150,22 @@ interface WMState {
   llmQuota?: { day: string; count: number };
   lastRun?: { at: number; found: number; written: number; skipped: number; error?: string };
   watchSince?: number;
+  /** 下一轮从第几个公众号开始检查（配合 maxAccountsPerRun 轮转） */
+  accountCursor?: number;
+  /** 列表接口被限频的冷却截止时间；未到期前一律不发列表请求 */
+  listCooldownUntil?: number;
+  /** 连续命中 -2014 的次数，用于指数退避 */
+  listCooldownHits?: number;
+  /** 已做过「限频安全默认值」迁移，防止每次启动都覆盖用户设置 */
+  migratedRateLimit?: boolean;
+  /** 已执行过「关闭启动时自动盯采」的一次性迁移（用户要求不要自动归档） */
+  noAutoArchive?: boolean;
+  /**
+   * reviewId → 公众号原文地址。
+   * 列表接口的 mpInfo 只有 originalId（内部 ID），没有 URL，地址只能从正文 og:url 抠；
+   * 这里缓存「按需取到」的结果，侧栏「原文」直接展示，不再每次重新请求。
+   */
+  mpUrls?: Record<string, string>;
 }
 
 const DEFAULTS: WMSettings = {
@@ -154,18 +183,50 @@ const DEFAULTS: WMSettings = {
   listWidth: 300,
   llm: { ...LLM_DEFAULTS },
   pages: 1,
-  intervalMin: 30,
-  maxPerRun: 6,
-  maxPerAccount: 2,
-  delayListMs: 1200,
-  delayContentMs: 2500,
+  intervalMin: 45,
+  maxPerRun: 4,
+  maxPerAccount: 1,
+  maxAccountsPerRun: 3,
+  rateSafeMode: true,
+  delayListMs: 6000,
+  delayContentMs: 4500,
   downloadImages: true,
   autoStart: false,
 };
 
 const MIN_INTERVAL = 15; // 风控下限：低于 15 分钟不进风控红线
 
+/**
+ * 防风控安全档（实测结论见 docs/QR-LOGIN.md）。
+ * 触发 -2014 的真实原因是「一轮把 27 个号全拉一遍」= 27 次请求/轮 + 封面图，
+ * 按 30 分钟一轮算一天 1296 次，且是 1.2 秒间隔的连续突发。
+ * 收敛后：每轮 3 次、间隔 6 秒、45 分钟一轮 ≈ 96 次/天，速率也平缓。
+ */
+const SAFE_RATE = {
+  maxAccountsPerRun: 3,
+  delayListMs: 6000,
+  intervalMin: 45,
+  delayContentMs: 4500,
+} as const;
+
 const sleep = (ms: number) => new Promise<void>((r) => window.setTimeout(r, ms));
+
+/**
+ * 并发受限的批量执行。
+ * 图片/音视频走 mmbiz CDN，和「列表接口」不是同一条限流通道，
+ * 没必要为了避险串行 + 每张等 2 秒；限制并发数就足够温和。
+ */
+async function mapLimit<T>(items: T[], limit: number, fn: (item: T, i: number) => Promise<void>): Promise<void> {
+  let next = 0;
+  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    for (;;) {
+      const i = next++;
+      if (i >= items.length) return;
+      await fn(items[i], i);
+    }
+  });
+  await Promise.all(workers);
+}
 
 function fmtDate(sec: number): string {
   if (!sec) return '';
@@ -252,7 +313,15 @@ export default class WereadMpCatcher extends Plugin {
   state: WMState = { processed: {} };
   private timer: number | null = null;
   private running = false;
-  private loginPolling = false;
+  /** 本次会话内确认「这篇没有公众号原文地址」的 reviewId，避免反复请求 */
+  private mpUrlMiss = new Set<string>();
+  /** 正在飞的取地址请求（同一个 reviewId 只发一次） */
+  private mpUrlPending = new Map<string, Promise<string>>();
+  /**
+   * 最近抓过的正文 HTML（只留 3 篇，约 10MB 内存）。
+   * 一篇 3.5MB，归档之后马上点「原文」不该再下一次。
+   */
+  private contentCache = new Map<string, string>();
   private statusEl: HTMLElement | null = null;
 
   private watch: WatchStatus = {
@@ -372,6 +441,178 @@ export default class WereadMpCatcher extends Plugin {
     return r1;
   };
 
+  /* ---------------- Chrome 登录兜底（Windows 上最稳的一条路） ---------------- */
+
+  /** 找本机 Chrome / Edge 可执行文件（Windows 与 macOS 都覆盖） */
+  findBrowserExe(): string {
+    const req = nodeRequire();
+    const fs = req ? req<{ existsSync?: (p: string) => boolean }>('fs') : null;
+    if (!fs?.existsSync) return '';
+    const env = processEnv();
+    const cands: string[] = [];
+    if (platformName() === 'win32') {
+      const pf = env.ProgramFiles || 'C:////Program Files';
+      const pf86 = env['ProgramFiles(x86)'] || 'C:////Program Files (x86)';
+      const local = env.LOCALAPPDATA || '';
+      cands.push(`${pf}\\Google\\Chrome\\Application\\chrome.exe`);
+      cands.push(`${pf86}\\Google\\Chrome\\Application\\chrome.exe`);
+      if (local) cands.push(`${local}\\Google\\Chrome\\Application\\chrome.exe`);
+      cands.push(`${pf}\\Microsoft\\Edge\\Application\\msedge.exe`);
+      cands.push(`${pf86}\\Microsoft\\Edge\\Application\\msedge.exe`);
+    } else {
+      cands.push('/Applications/Google Chrome.app/Contents/MacOS/Google Chrome');
+      cands.push('/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge');
+    }
+    return cands.find((p) => fs.existsSync?.(p)) || '';
+  }
+
+  /** 通过 CDP 读取 weread 域 cookie（Chrome 需以 --remote-debugging-port 启动） */
+  private async readCdpCookies(port: number): Promise<string | null> {
+    try {
+      const r = await requestUrl({ url: `http://127.0.0.1:${port}/json/list`, method: 'GET', throw: false });
+      if (r.status !== 200) return null;
+      const list = parseJson(r.text);
+      const targets = isArr(list) ? list.filter(isObj).map((o): CdpTarget => o) : [];
+      const page = targets.find((t) => t.type === 'page' && t.webSocketDebuggerUrl) || targets[0];
+      const wsUrl = page?.webSocketDebuggerUrl;
+      if (!wsUrl) return null;
+      const jar = await new Promise<Record<string, string> | null>((resolve) => {
+        const ws = new WebSocket(wsUrl);
+        const timer = window.setTimeout(() => {
+          try {
+            ws.close();
+          } catch {
+            /* noop */
+          }
+          resolve(null);
+        }, 6000);
+        ws.onopen = () => ws.send(JSON.stringify({ id: 1, method: 'Network.getAllCookies' }));
+        ws.onmessage = (ev) => {
+          try {
+            const msg = parseJson(String(ev.data));
+            const result = pickObj(msg, 'result');
+            const cookies = pickArr(result, 'cookies');
+            if (pickNum(msg, 'id') === 1 && cookies.length) {
+              window.clearTimeout(timer);
+              ws.close();
+              const out: Record<string, string> = {};
+              for (const c of cookies) {
+                if (!isObj(c)) continue;
+                const name = typeof c['name'] === 'string' ? c['name'] : '';
+                const value = typeof c['value'] === 'string' ? c['value'] : '';
+                const domain = typeof c['domain'] === 'string' ? c['domain'] : '';
+                if (name.startsWith('wr_') && /weread/.test(domain) && value) out[name] = value;
+              }
+              resolve(out);
+            }
+          } catch {
+            /* 忽略非 JSON 帧 */
+          }
+        };
+        ws.onerror = () => {
+          window.clearTimeout(timer);
+          resolve(null);
+        };
+      });
+      if (!jar) return null;
+      const ck = Object.entries(jar).map(([k, v]) => `${k}=${v}`).join('; ');
+      return ck || null;
+    } catch {
+      return null;
+    }
+  }
+
+  /** 关闭由本插件拉起的浏览器（CDP Browser.close 比 kill 干净） */
+  private async closeCdpBrowser(port: number): Promise<void> {
+    try {
+      const v = await requestUrl({ url: `http://127.0.0.1:${port}/json/version`, method: 'GET', throw: false });
+      if (v.status !== 200) return;
+      const info = parseJson(v.text);
+      const wsUrl = isObj(info) && typeof info['webSocketDebuggerUrl'] === 'string' ? info['webSocketDebuggerUrl'] : '';
+      if (!wsUrl) return;
+      await new Promise<void>((resolve) => {
+        const ws = new WebSocket(wsUrl);
+        const done = (): void => {
+          try {
+            ws.close();
+          } catch {
+            /* noop */
+          }
+          resolve();
+        };
+        window.setTimeout(done, 2500);
+        ws.onopen = () => ws.send(JSON.stringify({ id: 1, method: 'Browser.close' }));
+        ws.onmessage = done;
+        ws.onerror = done;
+      });
+    } catch {
+      /* noop */
+    }
+  }
+
+  /** 拉起本机 Chrome/Edge 让用户正常登录，登录后自动导入 cookie（Windows 推荐） */
+  async loginWithChrome(): Promise<void> {
+    const spawn = childProcessModule()?.spawn;
+    if (!spawn) {
+      new Notice('当前环境不支持拉起浏览器（仅桌面端可用）');
+      return;
+    }
+    const exe = this.findBrowserExe();
+    if (!exe) {
+      new Notice('没找到 Chrome / Edge，请先安装，或在下方手动粘贴 cookie', 10000);
+      return;
+    }
+    const port = 9333 + Math.floor(Math.random() * 60);
+    const base = vaultBasePath(this.app.vault.adapter) || '';
+    const profile = `${base}/${this.manifest.dir}/.chrome-login`;
+    let child: CliChild | null = null;
+    try {
+      child = spawn(
+        exe,
+        [
+          `--remote-debugging-port=${port}`,
+          `--user-data-dir=${profile}`,
+          '--no-first-run',
+          '--no-default-browser-check',
+          '--new-window',
+          'https://weread.qq.com/',
+        ],
+        { detached: true },
+      );
+    } catch (e) {
+      new Notice(`启动浏览器失败：${String(e).slice(0, 80)}`, 10000);
+      return;
+    }
+    new Notice('已打开 Chrome 登录窗口：在里面登录微信读书（扫码），登录后自动导入（最长等 6 分钟）', 10000);
+
+    const t0 = Date.now();
+    while (Date.now() - t0 < 6 * 60 * 1000) {
+      await sleep(2500);
+      const ck = await this.readCdpCookies(port);
+      if (!ck) continue;
+      const chk = checkCookie(ck);
+      if (!chk.ok) continue;
+      this.settings.cookie = normalizeCookie(ck);
+      this.settings.useSession = false;
+      await this.saveAll();
+      await this.closeCdpBrowser(port);
+      try {
+        child?.kill?.();
+      } catch {
+        /* noop */
+      }
+      const prof = await this.refreshProfile().catch(() => null);
+      const n = await this.syncAccountsFromShelf().catch(() => 0);
+      await this.checkWebLogin().catch(() => null);
+      this.notifyViews();
+      this.renderStatus();
+      this.emitWatch();
+      new Notice(`登录成功${prof?.name ? `：${prof.name}` : ''}${n ? ` · 书架 ${n} 个` : ''}`, 10000);
+      return;
+    }
+    new Notice('等待超时：可关闭该 Chrome 窗口，改用手动粘贴 cookie', 10000);
+  }
+
   /**
    * 从正在运行的 Chrome 通过 CDP 读取完整登录态（含 wr_gid 这类会话级 cookie）。
    * 前提：Chrome 以 --remote-debugging-port=9222 启动；已经登录过 weread.qq.com。
@@ -449,14 +690,14 @@ export default class WereadMpCatcher extends Plugin {
 
   /** 探测 Obsidian 自带 session 里是否有有效登录态（不依赖已移除的 electron.remote） */
   async probeSessionLogin(): Promise<boolean> {
-    const UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
+    const UA = WEREAD_UA;
     const acc = this.settings.shelfAccounts[0] || this.settings.accounts[0];
     // 首选判据：真的能拉到文章列表 —— 这才是我们要的能力
     if (acc?.bookId) {
       try {
         const r = await this.rawHttp(
           `https://weread.qq.com/web/mp/articles?bookId=${acc.bookId}&offset=0`,
-          { 'User-Agent': UA, Referer: `https://weread.qq.com/web/mp/${acc.bookId}`, Accept: 'application/json' },
+          { 'User-Agent': UA, Referer: 'https://weread.qq.com/', Accept: 'application/json' },
         );
         if (r.status === 200 && /"subReviews"|"reviews"/.test(r.text) && !/"err(?:Code|code)"\s*:\s*-20\d\d/.test(r.text)) {
           return true;
@@ -552,13 +793,15 @@ export default class WereadMpCatcher extends Plugin {
         const tag =
           probe.verdict === 'ok'
             ? '正常'
-            : probe.verdict === 'restricted'
-              ? '被限（-2041）'
-              : probe.verdict === 'expired'
-                ? '过期'
-                : probe.verdict === 'no-cookie'
-                  ? '未登录'
-                  : '未知';
+            : probe.verdict === 'rate-limited'
+              ? '被限频（-2014）'
+              : probe.verdict === 'restricted'
+                ? '被限（-2041）'
+                : probe.verdict === 'expired'
+                  ? '过期'
+                  : probe.verdict === 'no-cookie'
+                    ? '未登录'
+                    : '未知';
         this.pushLog(
           `自检：${tag}｜账号=${probe.account ?? '读不到'}｜列表码=${probe.listCode}｜${probe.hint}`,
           probe.verdict === 'ok' ? 'ok' : 'err',
@@ -587,6 +830,19 @@ export default class WereadMpCatcher extends Plugin {
 
     this.addSettingTab(new WMSettingTab(this.app, this));
 
+    // 用户明确要求「不要自动归档」。
+    // 一次性把历史配置里的 autoStart 关掉（只做一次，之后用户在设置页手动打开仍然生效），
+    // 避免旧 data.json / 从备份恢复的配置让插件一启动就自己跑。
+    if (!this.state.noAutoArchive) {
+      this.state.noAutoArchive = true;
+      const wasOn = this.settings.autoStart;
+      this.settings.autoStart = false;
+      await this.saveAll();
+      if (wasOn) {
+        this.pushLog('已关闭「启动时自动盯采」：不会自动抓取，需手动点「开始更新」', 'warn');
+      }
+    }
+
     if (this.settings.autoStart) this.startWatch(false);
   }
 
@@ -602,6 +858,20 @@ export default class WereadMpCatcher extends Plugin {
     const raw = (await this.loadData()) as { settings?: Partial<WMSettings>; state?: WMState } | null;
     this.settings = { ...DEFAULTS, ...(raw?.settings ?? {}) };
     this.state = raw?.state ?? { processed: {} };
+    // 防风控保护：把速率参数收敛到实测安全的档位。
+    // 直接改 data.json 没用 —— 运行中的插件会用内存里的 settings 回写覆盖，
+    // 所以必须在每次加载时收敛，才不会被打回危险区。
+    if (this.settings.rateSafeMode !== false) {
+      const S = this.settings;
+      if (!S.maxAccountsPerRun || S.maxAccountsPerRun > SAFE_RATE.maxAccountsPerRun) {
+        S.maxAccountsPerRun = SAFE_RATE.maxAccountsPerRun;
+      }
+      if (!S.delayListMs || S.delayListMs < SAFE_RATE.delayListMs) S.delayListMs = SAFE_RATE.delayListMs;
+      if (!S.intervalMin || S.intervalMin < SAFE_RATE.intervalMin) S.intervalMin = SAFE_RATE.intervalMin;
+      if (!S.delayContentMs || S.delayContentMs < SAFE_RATE.delayContentMs) {
+        S.delayContentMs = SAFE_RATE.delayContentMs;
+      }
+    }
     if (!this.state.processed) this.state.processed = {};
   }
 
@@ -625,71 +895,37 @@ export default class WereadMpCatcher extends Plugin {
 
   /* --------------------------------- cookie -------------------------------- */
 
-  /** 尝试从 Obsidian(Electron) session 读取 weread cookie；不可用时返回 null */
-  async tryReadSessionCookie(): Promise<string | null> {
-    try {
-      // 运行时按需加载 electron 模块：静态 import 会在移动端直接崩
-      const cookies = electronModule()?.remote?.session?.defaultSession?.cookies;
-      if (!cookies?.get) return null;
-      const list = await cookies.get({ domain: '.weread.qq.com' });
-      if (!list?.length) return null;
-      return list.map((c) => `${c.name}=${c.value}`).join('; ');
-    } catch {
-      return null;
-    }
-  }
-
-  /** 打开登录窗口（Electron 新窗口，与 Obsidian 共享 session），并轮询等 cookie 成熟后自动写入 */
+  /**
+   * 扫码登录入口（命令面板 / 设置页共用）。
+   * 旧实现依赖 webview 读 document.cookie，Obsidian 默认不放行 → 扫码永远没反应；
+   * 这里改为纯 HTTP 扫码：微信二维码 + 轮询 + 用 wx_code 换 cookie。
+   */
   openLoginWindow() {
-    const w = window.open('https://weread.qq.com/', '_blank');
-    if (!w) {
-      new Notice('无法打开窗口：请改用浏览器登录后粘贴 cookie');
-      return;
-    }
-    new Notice('扫码登录中…完成后会自动写入（最长等 90 秒）', 6000);
-    void this.waitForMatureCookie(90000).then((ok) => {
-      if (ok) {
-        new Notice('登录成功，完整 cookie 已写入');
-        void this.refreshApiKey();
-        void this.refreshProfile();
-      } else {
-        new Notice('90 秒内没读到完整登录态。若已扫码，请点「设置 → 读取登录态」重试', 10000);
-      }
-    });
+    this.startQrLogin();
   }
 
-  /** 轮询直到 cookie 成熟（wr_skey 为长串）。扫码确认前会拿到 8 字符临时值，必须等它变长。 */
-  private async waitForMatureCookie(maxWaitMs: number): Promise<boolean> {
-    const start = Date.now();
-    while (Date.now() - start < maxWaitMs) {
-      const ck = await this.tryReadSessionCookie();
-      if (ck) {
-        const chk = checkCookie(ck);
-        if (chk.ok) {
-          this.settings.cookie = ck;
-          await this.saveAll();
-          void this.verifyCookieLive(false);
-          this.emitWatch();
-          return true;
-        }
-      }
-      await new Promise((r) => window.setTimeout(r, 2000));
-    }
-    return false;
-  }
-
-  async importSessionCookie(): Promise<boolean> {
-    const ck = await this.tryReadSessionCookie();
-    if (!ck) return false;
-    const chk = checkCookie(ck);
-    if (!chk.ok) {
-      new Notice(`读到的 Cookie 不完整（缺 ${chk.missing.join(', ')}），已拒绝覆盖现有配置`, 8000);
-      return false;
-    }
-    this.settings.cookie = ck;
-    await this.saveAll();
-    await this.verifyCookieLive(true);
-    return true;
+  /** 打开扫码登录弹窗，成功后落盘并刷新账号/书架/状态 */
+  startQrLogin(): void {
+    new QrLoginModal(this.app, {
+      onSuccess: async (cookie) => {
+        this.settings.cookie = normalizeCookie(cookie);
+        this.settings.useSession = false;
+        await this.saveAll();
+        const key = await this.refreshApiKey().catch(() => null);
+        const prof = await this.refreshProfile().catch(() => null);
+        const n = await this.syncAccountsFromShelf().catch(() => 0);
+        const web = await this.checkWebLogin().catch(() => ({ ok: false, msg: '未知' }));
+        this.notifyViews();
+        this.renderStatus();
+        this.emitWatch();
+        new Notice(
+          `登录成功${prof?.name ? `：${prof.name}` : ''}${key ? ' · 已换出官方 Key' : ''}${
+            n ? ` · 书架 ${n} 个` : ''
+          }${web.ok ? ' · 列表可用' : ` · 列表仍不通：${web.msg}`}`,
+          web.ok ? 10000 : 16000,
+        );
+      },
+    }).open();
   }
 
   /* ------------------------------ 补图 / 再采集 ------------------------------ */
@@ -700,9 +936,10 @@ export default class WereadMpCatcher extends Plugin {
    */
   async repairNote(f: TFile): Promise<{ ok: number; fail: number; total: number }> {
     const md = await this.app.vault.read(f);
-    const m = /^source:\s*"?weread:\/\/([^"\n]+)"?/m.exec(md);
-    if (!m) throw new Error('这篇笔记里没有 weread 来源标记，无法定位原文');
-    const reviewId = m[1].trim();
+    // 兼容三种历史格式：source: weread://<rid> / source: <mp.weixin 原文> / 正文里的 reviewId
+    const m = /MP_WXS_\d+_WR[A-Za-z0-9]+/.exec(md);
+    if (!m) throw new Error('这篇笔记里找不到 reviewId，无法定位原文');
+    const reviewId = m[0];
     const cookie = normalizeCookie(this.settings.cookie || '');
     if (!this.hasLogin()) throw new Error('登录态无效，请先去设置里扫码登录');
 
@@ -827,14 +1064,34 @@ export default class WereadMpCatcher extends Plugin {
     if (!cmd) throw new Error('还没配置 Agent 命令');
     const args = rawArgs.map((a) => a.replace('{prompt}', prompt));
 
-    // Obsidian 是 GUI 进程，PATH 往往只有 /usr/bin:/bin —— 必须手工补全
+    // Obsidian 是 GUI 进程，PATH 往往不完整（macOS 只有 /usr/bin:/bin，Windows 缺 npm 全局目录）—— 必须手工补全
+    const isWin = platformName() === 'win32';
     const home = nodeOs()?.homedir?.() || '';
     const baseEnv = processEnv();
+    const extraPaths = isWin
+      ? [
+          baseEnv.APPDATA ? `${baseEnv.APPDATA}\\npm` : '',
+          baseEnv.LOCALAPPDATA ? `${baseEnv.LOCALAPPDATA}\\Programs` : '',
+          baseEnv.LOCALAPPDATA ? `${baseEnv.LOCALAPPDATA}\\Microsoft\\WindowsApps` : '',
+          home ? `${home}\\.local\\bin` : '',
+          home ? `${home}\\.kimi-code\\bin` : '',
+          baseEnv.ProgramFiles ? `${baseEnv.ProgramFiles}\\nodejs` : '',
+          baseEnv.SystemRoot ? `${baseEnv.SystemRoot}\\System32` : '',
+          baseEnv.SystemRoot ? `${baseEnv.SystemRoot}\\System32\\WindowsPowerShell\\v1.0` : '',
+        ]
+      : [
+          '/opt/homebrew/bin',
+          '/usr/local/bin',
+          home ? `${home}/.local/bin` : '',
+          home ? `${home}/.kimi-code/bin` : '',
+          '/usr/bin',
+          '/bin',
+          '/usr/sbin',
+          '/sbin',
+        ];
     const env = {
       ...baseEnv,
-      PATH: ['/opt/homebrew/bin', '/usr/local/bin', home ? `${home}/.local/bin` : '', home ? `${home}/.kimi-code/bin` : '', '/usr/bin', '/bin', '/usr/sbin', '/sbin']
-        .filter(Boolean)
-        .join(':'),
+      PATH: [...extraPaths, baseEnv.PATH || ''].filter(Boolean).join(isWin ? ';' : ':'),
     };
     const cwd = cfg.cwd || vaultBasePath(this.app.vault.adapter) || undefined;
 
@@ -843,7 +1100,8 @@ export default class WereadMpCatcher extends Plugin {
       let err = '';
       let child: CliChild;
       try {
-        child = spawn(cmd, args, { cwd, env });
+        // Windows 的 claude/codex 等入口是 .cmd，不经 shell 直接 spawn 会 ENOENT
+        child = spawn(cmd, args, { cwd, env, shell: isWin });
       } catch (e) {
         resolve({ code: -1, out: '', err: String(e), cmd });
         return;
@@ -934,6 +1192,7 @@ export default class WereadMpCatcher extends Plugin {
             readNum: it.readNum,
             likeNum: it.likeNum,
             picUrl: it.picUrl,
+            digest: it.digest,
           };
           added++;
         }
@@ -950,7 +1209,7 @@ export default class WereadMpCatcher extends Plugin {
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       if (e instanceof RiskError) {
-        new Notice(`登录过期了（-2012）：去设置 → 切换账号重新扫码，就能继续加载`, 10000);
+        new Notice(e.message, 10000);
       } else {
         new Notice(`加载「${name}」失败：${msg}`, 7000);
       }
@@ -980,7 +1239,7 @@ export default class WereadMpCatcher extends Plugin {
       try {
         items = await client.listArticles(acc.bookId, offset);
       } catch (e) {
-        if (e instanceof RiskError) new Notice('登录过期了，去设置里重新扫码', 9000);
+        if (e instanceof RiskError) new Notice(e.message, 9000);
         break;
       }
       if (!items.length) break;
@@ -994,6 +1253,7 @@ export default class WereadMpCatcher extends Plugin {
             readNum: it.readNum,
             likeNum: it.likeNum,
             picUrl: it.picUrl,
+            digest: it.digest,
           };
           fresh++;
         }
@@ -1066,141 +1326,9 @@ export default class WereadMpCatcher extends Plugin {
     new Notice('已退出微信读书账号：本机登录态、书架缓存、头像都已清空，可以重新扫码登录了。', 8000);
   }
 
-  /**
-   * iframe 内嵌登录：
-   * Obsidian 把 window.open 转给了系统浏览器（setWindowOpenHandler），
-   * 所以扫码窗口必须用同源 iframe —— cookie 落在 Obsidian 的 defaultSession，
-   * 之后 requestUrl 自动携带，不需要读取 cookie（绕过 electron.remote 被移除的问题）。
-   */
+  /** 扫码登录（命令 / 设置页统一入口）：走纯 HTTP 协议，不依赖内嵌 webview */
   startIframeLogin(): void {
-    const modal = new Modal(this.app);
-    modal.titleEl.setText('扫码登录微信读书');
-    const box = modal.contentEl.createDiv('wmc-login-iframe-box');
-    box.createDiv({
-      cls: 'wmc-login-tip',
-      text: '在下面窗口里用微信扫码。检测到登录态后会自动关闭并同步书架，不需要复制任何东西。',
-    });
-    const status = box.createDiv({ cls: 'wmc-login-status', text: '等待扫码…' });
-    // 必须用 webview 而不是 iframe：iframe 跨域读不到 document.cookie，
-    // webview 是独立 webContents，executeJavaScript 能在目标页上下文里取 cookie。
-    let wv: WebviewElement | null = null;
-    try {
-      wv = createWebviewElement();
-      wv.className = 'wmc-login-frame';
-      wv.setAttribute('src', 'https://weread.qq.com/');
-      wv.setAttribute('allowpopups', 'false');
-      box.appendChild(wv);
-    } catch {
-      wv = null;
-    }
-    if (!wv) {
-      const frame = box.createEl('iframe', { cls: 'wmc-login-frame' });
-      frame.setAttr('src', 'https://weread.qq.com/');
-    }
-    this.loginPolling = true;
-    modal.open();
-
-    // 手动兜底：探测卡住时用户可点这个立刻重试
-    let probeNow: (() => Promise<boolean>) | null = null;
-    const manual = box.createEl('button', { cls: 'wmc-hero-btn', text: '我已经扫码了，立即同步' });
-    manual.addEventListener('click', () => {
-      void (async () => {
-        status.setText('正在检测登录态…');
-        if (probeNow && (await probeNow())) return;
-        status.setText('还没检测到登录态，再等一下或重扫一次');
-      })();
-    });
-
-    let finished = false;
-    const finish = async (): Promise<boolean> => {
-      if (finished) return true;
-      let ok = false;
-      // ① webview 内直接读 document.cookie —— 最可靠，能拿到 wr_skey/wr_vid/wr_gid
-      if (wv && typeof wv.executeJavaScript === 'function') {
-        try {
-          const raw = await wv.executeJavaScript('document.cookie');
-          const str = typeof raw === 'string' ? raw : '';
-          if (/wr_skey=/.test(str) && /wr_vid=/.test(str)) {
-            this.settings.cookie = normalizeCookie(str);
-            this.settings.useSession = false;
-            ok = true;
-          }
-        } catch {
-          /* 页面还没加载完，下次再试 */
-        }
-      }
-      // ② 老环境能直接读 cookie
-      if (!ok) {
-        const ck = await this.tryReadSessionCookie();
-        if (ck && checkCookie(ck).ok) {
-          this.settings.cookie = normalizeCookie(ck);
-          this.settings.useSession = false;
-          ok = true;
-        }
-      }
-      // ③ 最后兜底：session 探测
-      if (!ok && (await this.probeSessionLogin())) {
-        this.settings.useSession = true;
-        ok = true;
-      }
-      if (!ok) return false;
-
-      finished = true;
-      this.loginPolling = false;
-      status.setText('登录成功，正在同步…');
-      try {
-        modal.close(); // 先关窗，用户在设置页就能看到信息卡刷新
-      } catch {
-        /* 用户已手动关闭 */
-      }
-      const key = await this.refreshApiKey().catch(() => null);
-      const prof = await this.refreshProfile().catch(() => null);
-      const n = await this.syncAccountsFromShelf().catch(() => 0);
-      const web = await this.checkWebLogin().catch(() => ({ ok: false, msg: '未知' }));
-      this.notifyViews();
-      this.renderStatus();
-      this.emitWatch();
-      new Notice(
-        `登录成功${prof?.name ? `：${prof.name}` : ''}${key ? ' · 已换出官方 Key' : ''}${
-          n ? ` · 书架 ${n} 个` : ''
-        }${web.ok ? ' · 列表可用' : ` · 列表仍不通：${web.msg}`}`,
-        web.ok ? 10000 : 16000,
-      );
-      return true;
-    };
-    probeNow = finish;
-
-    // 微信读书登录成功后会跳转页面 → iframe 触发 load，立刻探测一次
-    if (wv && typeof wv.addEventListener === 'function') {
-      wv.addEventListener('dom-ready', () => {
-        void finish();
-      });
-      wv.addEventListener('did-navigate', () => {
-        void finish();
-      });
-      wv.addEventListener('did-navigate-in-page', () => {
-        void finish();
-      });
-    }
-
-    void (async () => {
-      const t0 = Date.now();
-      let tries = 0;
-      while (this.loginPolling && Date.now() - t0 < 6 * 60 * 1000) {
-        await sleep(1800);
-        tries++;
-        if (finished) return;
-        if (tries % 3 === 0) status.setText(`等待扫码…（已检测 ${tries} 次，登录后会自动关闭）`);
-        if (await finish()) return;
-      }
-      this.loginPolling = false;
-      try {
-        modal.close();
-      } catch {
-        /* noop */
-      }
-      new Notice('等待扫码超时（6 分钟），已关闭窗口', 8000);
-    })();
+    this.startQrLogin();
   }
 
   /** 启动自检：没有 cookie 但 Obsidian session 里已登录 → 自动切 session 模式 */
@@ -1361,7 +1489,7 @@ export default class WereadMpCatcher extends Plugin {
     const acc = this.settings.shelfAccounts[0] || this.settings.accounts[0];
     if (acc?.bookId) {
       const url = `https://weread.qq.com/web/mp/articles?bookId=${acc.bookId}&offset=0`;
-      const UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
+      const UA = WEREAD_UA;
       out.push(`\n[3] 测号：${acc.name} ${acc.bookId}`);
       try {
         const a = await this.rawHttp(url, { Cookie: ck, 'User-Agent': UA, Referer: 'https://weread.qq.com/' });
@@ -1379,7 +1507,7 @@ export default class WereadMpCatcher extends Plugin {
 
     // 4) 用户资料端点逐个试
     out.push('\n[4] 用户资料端点：');
-    const UA2 = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
+    const UA2 = WEREAD_UA;
     const cands = [
       `https://weread.qq.com/web/user?userVid=${vid}`,
       'https://weread.qq.com/api/user/info',
@@ -1426,7 +1554,7 @@ export default class WereadMpCatcher extends Plugin {
             url: p.avatar,
             method: 'GET',
             throw: false,
-            headers: { 'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36' },
+            headers: { 'User-Agent': WEREAD_UA },
           });
           if (r.status === 200 && r.arrayBuffer.byteLength > 300) {
             const path = `${this.manifest.dir}/avatar.jpg`;
@@ -1465,62 +1593,6 @@ export default class WereadMpCatcher extends Plugin {
       new Notice(`同步书架失败：${e instanceof Error ? e.message : String(e)}`, 8000);
       return 0;
     }
-  }
-
-  /** 扫码登录：开窗口 → 轮询登录态 → 存登录态 + 换官方 Key + 同步书架 */
-  async startQrLogin(): Promise<void> {
-    const w = window.open('https://weread.qq.com/', '_blank');
-    if (!w) {
-      new Notice('无法打开登录窗口；请允许 Obsidian 打开新窗口');
-      return;
-    }
-    new Notice('已打开登录窗口：微信扫码后自动完成，不需要复制任何东西', 10000);
-    this.loginPolling = true;
-    const t0 = Date.now();
-    while (this.loginPolling && Date.now() - t0 < 6 * 60 * 1000) {
-      await sleep(2500);
-      let ok = false;
-      // A) 老环境能直接读到 cookie
-      const ck = await this.tryReadSessionCookie();
-      if (ck && checkCookie(ck).ok) {
-        this.settings.cookie = normalizeCookie(ck);
-        this.settings.useSession = false;
-        ok = true;
-      }
-      // B) 读不到 cookie（Obsidian 1.14 已移除 electron.remote）→ 请求探测 session 登录态
-      if (!ok && (await this.probeSessionLogin())) {
-        this.settings.useSession = true;
-        ok = true;
-      }
-      if (!ok) continue;
-      const key = await this.refreshApiKey();
-      if (key) this.settings.wereadApiKey = key;
-      await this.saveAll();
-      this.loginPolling = false;
-      try {
-        w.close();
-      } catch {
-        /* 用户已手动关闭 */
-      }
-      // 关键：拿到登录态后立刻拉资料与书架，否则信息卡/订阅列表要等用户手动操作才出现
-      const prof = await this.refreshProfile().catch(() => null);
-      const n = await this.syncAccountsFromShelf();
-      this.notifyViews();
-      this.renderStatus();
-      this.emitWatch();
-      new Notice(
-        `登录成功${prof?.name ? `：${prof.name}` : ''}${key ? '，已获取官方 Key' : ''}${
-          n ? `；书架 ${n} 个公众号` : ''
-        }`,
-        10000,
-      );
-      return;
-    }
-    this.loginPolling = false;
-  }
-
-  cancelQrLogin(): void {
-    this.loginPolling = false;
   }
 
   /* -------------------------------- watching ------------------------------- */
@@ -1581,22 +1653,39 @@ export default class WereadMpCatcher extends Plugin {
     if (!chk.ok) {
       if (manual) new Notice(`Cookie 不完整，缺：${chk.missing.join(', ')}（缺 wr_gid 会报 -2012）`, 8000);
     }
-    const accounts = this.settings.accounts.filter((a) => a.bookId?.startsWith('MP_WXS_'));
+    const accounts = this.settings.accounts.filter((a) => String(a.bookId || '').toUpperCase().startsWith('MP_WXS_'));
     if (!accounts.length) {
-      if (manual) new Notice('还没有公众号：设置里添加 bookid（mp_wxs_xxx）');
+      if (manual) new Notice('还没有公众号：设置里添加 bookid（MP_WXS_ 开头）');
       return;
     }
+
+    // 限频冷却期：一律不发列表请求，避免越试越锁
+    const coolLeft = (this.state.listCooldownUntil ?? 0) - Date.now();
+    if (coolLeft > 0) {
+      const mins = Math.ceil(coolLeft / 60000);
+      const msg = `列表接口还在限频冷却中，约 ${mins} 分钟后可再试（-2014）`;
+      this.pushLog(msg, 'err');
+      if (manual) new Notice(msg, 9000);
+      return;
+    }
+
+    // 本轮只检查一部分公众号（游标轮转），总量 27 个号也不会一次全拉
+    const perRun = Math.max(1, Math.min(accounts.length, this.settings.maxAccountsPerRun ?? 5));
+    const cursor = this.state.accountCursor ?? 0;
+    const batch: AccountRef[] = [];
+    for (let i = 0; i < perRun; i++) batch.push(accounts[(cursor + i) % accounts.length]);
+    this.state.accountCursor = (cursor + batch.length) % accounts.length;
 
     this.running = true;
     this.watch.busy = true;
     this.watch.phase = 'list';
     this.watch.accountIndex = 0;
-    this.watch.accountTotal = accounts.length;
+    this.watch.accountTotal = batch.length;
     this.watch.found = 0;
     this.watch.written = 0;
     this.watch.skipped = 0;
     this.watch.lastError = undefined;
-    this.pushLog(`开始更新 · 检查 ${accounts.length} 个公众号`);
+    this.pushLog(`开始更新 · 本轮检查 ${batch.length}/${accounts.length} 个公众号`);
     this.emitWatch();
     const client = new WereadClient(this.http, cookie);
     let found = 0;
@@ -1607,7 +1696,7 @@ export default class WereadMpCatcher extends Plugin {
     try {
       // ① 收集新条目（按号轮转，保证公平）
       const queueByAccount: Array<{ acc: AccountRef; items: ArticleItem[] }> = [];
-      for (const acc of accounts) {
+      for (const acc of batch) {
         this.watch.account = acc.name;
         this.watch.accountIndex++;
         this.emitWatch();
@@ -1627,6 +1716,7 @@ export default class WereadMpCatcher extends Plugin {
                 readNum: it.readNum,
                 likeNum: it.likeNum,
                 picUrl: it.picUrl,
+                digest: it.digest,
               };
               this.state.discovered[it.reviewId] = entry;
               if (it.picUrl && this.settings.downloadImages) {
@@ -1703,6 +1793,11 @@ export default class WereadMpCatcher extends Plugin {
       }
 
       this.state.lastRun = { at: Date.now(), found, written, skipped, error: riskHit ? '风控熔断' : undefined };
+      // 这一轮跑通了说明限频已解除，清掉冷却与退避计数
+      if (!riskHit) {
+        this.state.listCooldownHits = 0;
+        this.state.listCooldownUntil = 0;
+      }
       await this.saveAll();
       if (manual) {
         new Notice(`抓取完成：发现 ${found} 篇新文，落盘 ${written} 篇${skipped ? `，跳过 ${skipped}` : ''}`);
@@ -1713,8 +1808,19 @@ export default class WereadMpCatcher extends Plugin {
       this.watch.lastError = msg.slice(0, 60);
       this.watch.phase = 'cooldown';
       this.pushLog(`抓取中断：${msg}`, 'err');
+      // -2014 是接口级限频：记冷却时间 + 指数退避（2h → 4h → 8h → 16h → 24h 封顶）。
+      // 实测 30 分钟不够用，所以起点定在 2 小时，避免用户反复重试把窗口越推越长。
+      if (e instanceof RiskError && e.code === -2014) {
+        const hits = (this.state.listCooldownHits ?? 0) + 1;
+        const hours = Math.min(24, 2 ** hits);
+        this.state.listCooldownHits = hits;
+        this.state.listCooldownUntil = Date.now() + hours * 3600_000;
+        const until = new Date(this.state.listCooldownUntil).toLocaleString();
+        this.pushLog(`列表接口被限频，冷却到 ${until}（第 ${hits} 次，${hours} 小时）`, 'err');
+        new Notice(`列表接口限频（-2014）\n已暂停到 ${until}\n期间不会发任何列表请求`, 12000);
+      }
       await this.saveAll();
-      new Notice(`抓取中断：${msg}`);
+      if (!(e instanceof RiskError && e.code === -2014)) new Notice(`抓取中断：${msg}`);
     } finally {
       this.running = false;
       this.watch.busy = false;
@@ -1730,18 +1836,33 @@ export default class WereadMpCatcher extends Plugin {
   }
 
   private async fetchOne(client: WereadClient, acc: AccountRef, item: ArticleItem): Promise<'written' | 'exists' | 'empty'> {
-    const html = await client.getContentHtml(item.reviewId);
-    let { markdown } = htmlToMarkdown(html);
-    const { images, media } = htmlToMarkdown(html);
+    const html = await this.loadContent(client, item.reviewId);
+    // 微信读书不提供公众号原网页地址给读者，但正文 HTML 的 og:url 就是原文本身。
+    // 抓到就记住：笔记里给「微信中可打开」的原文链接，侧栏「原文」也用它。
+    const mpUrl = extractMpOriginalUrl(html);
+    if (mpUrl) {
+      if (!this.state.mpUrls) this.state.mpUrls = {};
+      if (this.state.mpUrls[item.reviewId] !== mpUrl) this.state.mpUrls[item.reviewId] = mpUrl;
+      const rec = this.state.discovered?.[item.reviewId];
+      if (rec && rec.mpUrl !== mpUrl) rec.mpUrl = mpUrl;
+    }
+    // 只解析一次：之前连写两遍，3.5MB HTML 白解析一次
+    const parsed = htmlToMarkdown(html);
+    const { images, media } = parsed;
+    let { markdown } = parsed;
 
     // 图片笔记（小绿书）：正文由前端 JS 渲染，HTML 里没有 js_content。
     // 只有封面图 + 摘要可用 —— 用它们生成一篇「图片笔记」而不是判空丢弃。
     if (!markdown.trim() && !images.length && !media.length) {
-      if (item.picUrl || item.digest) {
+      if (item.picUrl || item.digest || mpUrl) {
         const bits: string[] = [];
-        bits.push('> 这是一篇**图片笔记**（小绿书）。微信读书只提供封面与摘要，完整内容请点原文链接。');
+        bits.push(
+          mpUrl
+            ? '> 这篇没有可提取的正文（微信读书只存了封面/摘要，正文由前端渲染）。点下面的公众号原文看全文。'
+            : '> 这篇没有可提取的正文，也没有可用的原文地址。',
+        );
         if (item.digest) bits.push('', item.digest);
-        bits.push('', `[在微信读书打开原文](https://weread.qq.com/web/mp/${item.reviewId})`);
+        if (mpUrl) bits.push('', `[在微信中打开公众号原文](${mpUrl})`);
         markdown = bits.join('\n');
         if (item.picUrl && !images.length) images.push({ src: item.picUrl } as never);
       } else {
@@ -1754,12 +1875,12 @@ export default class WereadMpCatcher extends Plugin {
     const assetDir = normalizePath(`${this.settings.outputDir}/assets/${base}`);
     await this.ensureFolder(dir);
 
-    // 图片本地化
+    // 图片本地化：并发 5 张。图片在 mmbiz CDN 上，不受公众号列表接口限流约束，
+    // 之前每张之间还 sleep(delayContentMs/2)=2.25s，8 张图要白等 18 秒。
     const localPaths: string[] = [];
     if (this.settings.downloadImages && images.length) {
       await this.ensureFolder(assetDir);
-      for (let i = 0; i < images.length; i++) {
-        const img = images[i];
+      await mapLimit(images, 5, async (img, i) => {
         try {
           const buf = await client.fetchImage(img.src);
           const ext = guessExt(buf);
@@ -1769,8 +1890,7 @@ export default class WereadMpCatcher extends Plugin {
         } catch {
           localPaths[i] = '';
         }
-        await sleep(Math.round(this.settings.delayContentMs / 2));
-      }
+      });
     }
 
     // 音视频：尽力解析直链 → 本地化 + Obsidian 播放器标签；失败降级为原站链接
@@ -1802,7 +1922,8 @@ export default class WereadMpCatcher extends Plugin {
           } catch {
             /* 落到降级分支 */
           }
-          await sleep(this.settings.delayContentMs);
+          // CDN 直链下载，不属于公众号接口限流通道：原来每段 sleep 4.5s 纯属白等
+          await sleep(200);
         }
         if (!saved) mediaRefs.push({ ...m, url });
       }
@@ -1819,7 +1940,9 @@ export default class WereadMpCatcher extends Plugin {
       '---',
       `title: "${(item.title || '').replace(/"/g, '\\"')}"`,
       `date: ${ymdNow()}`,
-      `source: "weread://${item.reviewId}"`,
+      `source: "${mpUrl || `weread://${item.reviewId}`}"`,
+      `reviewId: "${item.reviewId}"`,
+      mpUrl ? `mp_url: "${mpUrl.replace(/"/g, '\\"')}"` : null,
       `author: "${acc.name.replace(/"/g, '\\"')}"`,
       `author_org: "${acc.name.replace(/"/g, '\\"')}（微信读书）"`,
       'tags:',
@@ -1835,6 +1958,8 @@ export default class WereadMpCatcher extends Plugin {
       `> 来源：微信读书 · ${acc.name}${item.readNum !== undefined ? `｜阅读 ${item.readNum}` : ''}${
         item.likeNum !== undefined ? ` · 赞 ${item.likeNum}` : ''
       }｜发布 ${published}`,
+      '',
+      mpUrl ? `[在微信中打开公众号原文](${mpUrl})` : null,
       '',
       '## 正文',
       '',
@@ -2090,7 +2215,7 @@ export default class WereadMpCatcher extends Plugin {
     }
     const chk = checkCookie(cookie);
     if (!chk.ok) return `Cookie 不完整，缺 ${chk.missing.join(', ')}`;
-    const accounts = this.settings.accounts.filter((a) => a.bookId?.startsWith('MP_WXS_'));
+    const accounts = this.settings.accounts.filter((a) => String(a.bookId || '').toUpperCase().startsWith('MP_WXS_'));
     if (!accounts.length) return 'Cookie 格式 OK（但还没添加公众号）';
     const client = new WereadClient(this.http, cookie);
     try {
@@ -2153,6 +2278,83 @@ export default class WereadMpCatcher extends Plugin {
     return i >= 0 ? md.slice(i + 5) : md;
   }
 
+  /**
+   * 从已归档笔记里取公众号原文地址。
+   * state.discovered 里的 mpUrl 只有「抓过正文」才有，老笔记靠这条兜底，
+   * 免得侧栏「原文」对已归档文章反而显示「没有地址」。
+   */
+  async noteMpUrl(path?: string): Promise<string> {
+    if (!path) return '';
+    try {
+      const f = this.app.vault.getAbstractFileByPath(path);
+      if (!(f instanceof TFile)) return '';
+      const md = await this.app.vault.cachedRead(f);
+      const fm = /^mp_url:\s*"?([^"\n]+)"?/m.exec(md);
+      if (fm && /mp\.weixin\.qq\.com/.test(fm[1])) return fm[1].trim();
+      const m = /https?:\/\/mp\.weixin\.qq\.com\/s(?:\?|\/)[^\s)"'<>]*/.exec(md);
+      return m ? m[0].replace(/[),.;]+$/, '') : '';
+    } catch {
+      return '';
+    }
+  }
+
+  /**
+   * 按需只取「公众号原文地址」：抓一次正文 HTML，抠出 og:url，不落盘笔记。
+   * 列表接口不带原文地址（mpInfo 里只有 originalId，不是 URL），所以只能这样补；
+   * 结果缓存在 state.mpUrls，同一个会话里再打开「原文」不会再请求。
+   */
+  async resolveMpUrl(reviewId: string): Promise<string> {
+    const cached = this.state.mpUrls?.[reviewId];
+    if (cached) return cached;
+    if (this.mpUrlMiss.has(reviewId)) return '';
+    // 侧栏可能在几毫秒内连渲两次，同一个 reviewId 只允许一个请求在飞
+    const pending = this.mpUrlPending.get(reviewId);
+    if (pending) return pending;
+    const job = this.fetchMpUrl(reviewId).finally(() => this.mpUrlPending.delete(reviewId));
+    this.mpUrlPending.set(reviewId, job);
+    return job;
+  }
+
+  /** 取正文 HTML，命中近期缓存就不再发请求（3.5MB/篇，省一次就是一两秒） */
+  private async loadContent(client: WereadClient, reviewId: string): Promise<string> {
+    const hit = this.contentCache.get(reviewId);
+    if (hit) return hit;
+    const html = await client.getContentHtml(reviewId);
+    this.contentCache.set(reviewId, html);
+    while (this.contentCache.size > 3) {
+      const oldest = this.contentCache.keys().next().value as string | undefined;
+      if (oldest === undefined) break;
+      this.contentCache.delete(oldest);
+    }
+    return html;
+  }
+
+  private async fetchMpUrl(reviewId: string): Promise<string> {
+    const cookie = normalizeCookie(this.settings.cookie || '');
+    if (!cookie) return '';
+    const client = new WereadClient(this.http, cookie);
+    try {
+      const html = await this.loadContent(client, reviewId);
+      const url = extractMpOriginalUrl(html);
+      if (!url) {
+        // 视频号/已删除文章没有 og:url，记住别再反复请求
+        this.mpUrlMiss.add(reviewId);
+        return '';
+      }
+      if (!this.state.mpUrls) this.state.mpUrls = {};
+      this.state.mpUrls[reviewId] = url;
+      const rec = this.state.discovered?.[reviewId];
+      if (rec) rec.mpUrl = url;
+      this.mpUrlMiss.delete(reviewId);
+      await this.saveAll();
+      return url;
+    } catch (e) {
+      this.mpUrlMiss.add(reviewId);
+      new Notice(`取原文链接失败：${e instanceof Error ? e.message : String(e)}`, 6000);
+      return '';
+    }
+  }
+
   /** 列表里点「抓取并归档」走这里 */
   async archiveSingle(reviewId: string, accountName: string): Promise<boolean> {
     const acc = this.settings.accounts.find((a) => (a.name || a.bookId) === accountName);
@@ -2167,6 +2369,10 @@ export default class WereadMpCatcher extends Plugin {
       time: d?.time ?? Math.floor(Date.now() / 1000),
       readNum: d?.readNum,
       likeNum: d?.likeNum,
+      // 必须带上：图片类文章（小绿书）没有 js_content，只能靠封面 + 摘要生成图片笔记。
+      // 之前这里漏传，导致这类文章在侧栏点「抓取并归档」总是返回 empty → 显示「失败，重试」。
+      picUrl: d?.picUrl,
+      digest: d?.digest,
       mpName: acc.name,
     };
     const cookie = normalizeCookie(this.settings.cookie || '');
@@ -2178,6 +2384,10 @@ export default class WereadMpCatcher extends Plugin {
     try {
       const ok = await this.fetchOne(client, acc, item);
       if (ok === 'written') await this.saveAll();
+      if (ok === 'empty') {
+        new Notice('这篇没有正文也没有封面（可能是已删除，或只能在微信里打开），已跳过', 6000);
+        return false;
+      }
       return ok === 'written' || ok === 'exists';
     } catch (e) {
       new Notice(`抓取失败：${e instanceof Error ? e.message : String(e)}`);
@@ -2357,7 +2567,7 @@ class WMSettingTab extends PluginSettingTab {
     this.frButtons(
       containerEl,
       '扫码登录',
-      '点「重新扫码」，在弹出的内嵌窗口里扫码。登录态会直接落进 Obsidian，不需要复制任何东西。',
+      '点「重新扫码」，用微信扫弹窗里的二维码并确认。登录态会直接落进 Obsidian，不需要复制任何东西。',
       loginBtns,
     );
 
@@ -2378,6 +2588,12 @@ class WMSettingTab extends PluginSettingTab {
           },
         },
       ],
+    );
+    this.frButtons(
+      adv,
+      '用 Chrome 登录（Windows 推荐）',
+      '插件会拉起本机 Chrome / Edge 打开微信读书，你在窗口里正常登录（扫码），成功后自动导入 cookie 并关闭窗口。',
+      [{ text: '开始', onClick: () => void this.plugin.loginWithChrome() }],
     );
     this.frButtons(adv, '诊断登录态', '把 cookie 与 session 的探测结果写入插件目录「诊断.txt」', [
       { text: '运行诊断', onClick: () => this.plugin.diagnoseLogin() },
@@ -2451,7 +2667,9 @@ class WMSettingTab extends PluginSettingTab {
       this.frText(
         containerEl,
         '命令',
-        '要执行的程序，例如 /usr/local/bin/my-agent',
+        platformName() === 'win32'
+          ? '要执行的程序，例如 C:////Users////me////AppData////Roaming////npm////my-agent.cmd'
+          : '要执行的程序，例如 /usr/local/bin/my-agent',
         this.plugin.settings.agent.cmd,
         async (v) => {
           this.plugin.settings.agent.cmd = v;
@@ -2514,7 +2732,7 @@ class WMSettingTab extends PluginSettingTab {
           onClick: async () => {
             const added = this.parseAccounts(this.accountsDraft);
             if (!added.length) {
-              new Notice('没识别到 bookid（需要 mp_wxs_ 开头）');
+              new Notice('没识别到 bookid（需要 MP_WXS_ 开头的 ID）');
               return;
             }
             for (const a of added) {
@@ -2603,6 +2821,96 @@ class WMSettingTab extends PluginSettingTab {
 
     this.frToggle(
       containerEl,
+      '防风控保护（建议开启）',
+      '开启时每次加载都会强制收敛到安全档：每轮检查号数 ≤3、列表间隔 ≥6000ms、轮询间隔 ≥45 分钟、正文间隔 ≥4500ms。你在界面上填得更激进也会被拉回；确实要跑更快的参数，得先关掉这个开关',
+      this.plugin.settings.rateSafeMode !== false,
+      async (v) => {
+        this.plugin.settings.rateSafeMode = v;
+        await this.plugin.saveAll();
+        this.display();
+      },
+    );
+
+    this.frPair(
+      containerEl,
+      '每轮检查号数 / 列表间隔(ms)',
+      '公众号多的时候别一次全拉：27 个号全量拉一轮 = 27 次列表请求，很容易触发 -2014。间隔建议 ≥2500ms',
+      {
+        value: String(this.plugin.settings.maxAccountsPerRun ?? 5),
+        onChange: async (v) => {
+          const n = Number(v);
+          if (Number.isFinite(n) && n >= 1) {
+            this.plugin.settings.maxAccountsPerRun = Math.min(50, Math.round(n));
+            await this.plugin.saveAll();
+          }
+        },
+      },
+      {
+        value: String(this.plugin.settings.delayListMs ?? 2500),
+        onChange: async (v) => {
+          const n = Number(v);
+          if (Number.isFinite(n) && n >= 500) {
+            this.plugin.settings.delayListMs = Math.min(30000, Math.round(n));
+            await this.plugin.saveAll();
+          }
+        },
+      },
+    );
+
+    this.frText(
+      containerEl,
+      '正文间隔(ms)',
+      '抓每篇文章正文之间的等待。防风控保护开启时会自动抬到 ≥4500ms',
+      String(this.plugin.settings.delayContentMs ?? 4500),
+      async (v) => {
+        const n = Number(v);
+        if (Number.isFinite(n) && n >= 300) {
+          this.plugin.settings.delayContentMs = Math.min(60000, Math.round(n));
+          await this.plugin.saveAll();
+        }
+      },
+      { numeric: true },
+    );
+
+    // 实时估算请求量：让「会不会被限流」变成看得见的数字
+    {
+      const perRun = Math.max(1, this.plugin.settings.maxAccountsPerRun ?? 5);
+      const interval = Math.max(MIN_INTERVAL, this.plugin.settings.intervalMin || 30);
+      const roundsPerDay = Math.floor((24 * 60) / interval);
+      const mine = perRun * roundsPerDay;
+      const naive = 27 * roundsPerDay;
+      const coverHours = Math.ceil(27 / perRun) * (interval / 60);
+      containerEl.createDiv({
+        cls: 'wmc-qr-hint',
+        text:
+          `当前估算：每轮 ${perRun} 次列表请求 × 每天约 ${roundsPerDay} 轮 ≈ ${mine} 次/天` +
+          `（27 个号全量拉则是 ${naive} 次/天）；覆盖一遍全部公众号约需 ${coverHours.toFixed(1)} 小时。` +
+          `保守档参考：每轮 3、间隔 6000ms、45 分钟一轮 → 约 96 次/天。`,
+      });
+    }
+
+    const coolUntil = this.plugin.state.listCooldownUntil ?? 0;
+    if (coolUntil > Date.now()) {
+      const row = new Setting(containerEl)
+        .setName('列表接口限频冷却中（-2014）')
+        .setDesc(
+          `已暂停发请求到 ${new Date(coolUntil).toLocaleString()}（连续命中 ${this.plugin.state.listCooldownHits ?? 1} 次，退避自动加长）。确认已解除（比如浏览器里能正常打开公众号列表）再手动解除。`,
+        );
+      row.addButton((b) =>
+        b
+          .setButtonText('解除冷却')
+          .setWarning()
+          .onClick(async () => {
+            this.plugin.state.listCooldownUntil = 0;
+            this.plugin.state.listCooldownHits = 0;
+            await this.plugin.saveAll();
+            this.display();
+          }),
+      );
+    }
+
+    this.frToggle(
+      containerEl,
       '图片本地化',
       '下载正文图片到库内 assets，避免外链失效',
       this.plugin.settings.downloadImages,
@@ -2615,7 +2923,7 @@ class WMSettingTab extends PluginSettingTab {
     this.frToggle(
       containerEl,
       '启动时自动盯采',
-      'Obsidian 打开后自动开始轮询',
+      '默认关闭。关闭时插件不会有任何自动行为：不轮询、不抓取、不写笔记；只有你点「开始更新」/「立即抓取一轮」才会归档',
       this.plugin.settings.autoStart,
       async (v) => {
         this.plugin.settings.autoStart = v;
@@ -3084,9 +3392,10 @@ class WMSettingTab extends PluginSettingTab {
     for (const line of raw.split('\n')) {
       const s = line.trim();
       if (!s) continue;
-      const m = /MP_WXS_\d+/.exec(s);
+      const m = /MP_WXS_\d+/i.exec(s);
       if (!m) continue;
-      const bookId = m[0];
+      // 统一大写：前缀是微信读书的类型标记，大小写敏感，手打小写会匹配不上接口
+      const bookId = m[0].toUpperCase();
       let name = s.replace(m[0], '').replace(/[|｜,，\t]+/g, ' ').trim();
       if (!name) name = bookId;
       out.push({ name, bookId });

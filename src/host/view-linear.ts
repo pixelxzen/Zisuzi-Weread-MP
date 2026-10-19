@@ -17,6 +17,8 @@ export interface RowItem {
   likeNum?: number;
   picUrl?: string;
   localCover?: string;
+  /** 公众号原文地址（抓过正文才有） */
+  mpUrl?: string;
   archived: boolean;
   path?: string;
   read: boolean;
@@ -155,7 +157,7 @@ export class WmcView extends ItemView {
     const out: RowItem[] = [];
     const push = (
       rid: string,
-      d: { account: string; title: string; time: number; readNum?: number; likeNum?: number; picUrl?: string; localCover?: string },
+      d: { account: string; title: string; time: number; readNum?: number; likeNum?: number; picUrl?: string; localCover?: string; mpUrl?: string },
     ) => {
       const done = processed[rid];
       out.push({
@@ -166,6 +168,7 @@ export class WmcView extends ItemView {
         readNum: d.readNum,
         likeNum: d.likeNum,
         picUrl: d.picUrl,
+        mpUrl: d.mpUrl || p.state.mpUrls?.[rid],
         localCover: d.localCover,
         archived: !!done,
         path: done?.path,
@@ -317,7 +320,7 @@ export class WmcView extends ItemView {
         setting?: { open?: () => void; openTabById?: (id: string) => void };
       };
       st.setting?.open?.();
-      st.setting?.openTabById?.('zisuzi-weread-mp');
+      st.setting?.openTabById?.(this.plugin.manifest.id);
     });
   }
 
@@ -1192,12 +1195,30 @@ export class WmcView extends ItemView {
     }
 
     if (this.tab === 'origin') {
-      const a = body.createEl('a', {
-        text: '在微信读书打开原文 →',
-        href: `https://weread.qq.com/web/mp/content?reviewId=${encodeURIComponent(r.reviewId)}`,
-      });
-      a.setAttr('target', '_blank');
-      body.createDiv({ cls: 'wmc-hint', text: '需已登录微信读书网页版。' });
+      // 已归档的老笔记里没有 state.mpUrl，但 frontmatter 里存了 mp_url
+      let url = r.mpUrl || '';
+      if (!url && r.path) url = await this.plugin.noteMpUrl(r.path);
+      if (!url) {
+        // 列表接口不提供原文地址（只给公众号内部 ID），只能从正文里抠一次。
+        // 打开「原文」就自动取，不需要点按钮；结果缓存在 state.mpUrls。
+        const busy = body.createDiv({ cls: 'wmc-hint', text: '正在获取公众号原文地址…' });
+        url = await this.plugin.resolveMpUrl(r.reviewId);
+        busy.remove();
+        if (url) r.mpUrl = url;
+      }
+      if (url) {
+        const a = body.createEl('a', { cls: 'wmc-mp-url', text: url, href: url });
+        a.setAttr('target', '_blank');
+        body.createDiv({
+          cls: 'wmc-hint',
+          text: '在微信里点开能直接看全文；桌面浏览器会提示「环境异常」，这是微信侧的限制，不是链接失效。',
+        });
+      } else {
+        body.createDiv({
+          cls: 'wmc-hint',
+          text: '这篇取不到公众号原文地址：视频号/图片类文章或已删除的文章，微信读书侧本身就不带原始链接。',
+        });
+      }
       return;
     }
 
