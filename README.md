@@ -13,6 +13,7 @@
 <p align="center">
   <a href="README_EN.md">English</a> ·
   <a href="#三分钟上手">快速开始</a> ·
+  <a href="#登录状态怎么看">登录状态</a> ·
   <a href="#常见问题">常见问题</a> ·
   <a href="https://github.com/pixelxzen/Zisuzi-Weread-MP/issues">反馈问题</a>
 </p>

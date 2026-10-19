@@ -13,6 +13,7 @@
 <p align="center">
   <a href="README.md">简体中文</a> ·
   <a href="#quickstart">Quickstart</a> ·
+  <a href="#reading-the-login-indicator">Login status</a> ·
   <a href="#faq">FAQ</a> ·
   <a href="https://github.com/pixelxzen/Zisuzi-Weread-MP/issues">Issues</a>
 </p>
