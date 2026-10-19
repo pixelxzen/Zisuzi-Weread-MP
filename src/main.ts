@@ -1180,7 +1180,10 @@ export default class WereadMpCatcher extends Plugin {
       self.settings.cookie = str;
       self.settings.useSession = false;
       const probe = await self.verifyCookieLive(false).catch(() => null);
-      if (!probe || probe.verdict !== 'ok') {
+      // restricted = 登录态有效、只是「公众号接口」对这个账号限流（-2041）。
+      // 这种情况扫码也救不了，必须当成功收工，并在 Notice 里说清是限流而不是没登录。
+      const alive = !!probe && (probe.verdict === 'ok' || probe.verdict === 'restricted');
+      if (!alive) {
         status.setText(
           changed
             ? `已拿到 Cookie，但接口还不通（${probe ? probe.hint : '无响应'}）：点「我已经扫码了，立即同步」重试`
