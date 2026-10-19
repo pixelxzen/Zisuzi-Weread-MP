@@ -263,6 +263,8 @@ export default class WereadMpCatcher extends Plugin {
   private loginModal: Modal | null = null;
   /** 真实的 Electron 登录窗口（能拿到 HttpOnly cookie） */
   private loginWin: RemoteWindowLike | null = null;
+  /** 设置页注册的刷新回调：登出等状态变更后要当场重绘设置页 */
+  settingsRefresh?: () => void;
   private statusEl: HTMLElement | null = null;
 
   private watch: WatchStatus = {
@@ -989,18 +991,66 @@ export default class WereadMpCatcher extends Plugin {
   }
 
   /** 登出：清本地登录态 + 清 Electron session 里 weread 域 cookie（不清的话重扫码还是旧账号） */
+  /**
+   * 真正清掉「Obsidian 里那个浏览器」的 weread 登录态。
+   *
+   * 为什么必须要这一步（2026-10-19 实测）：登出后 `~/Library/Application Support/obsidian/Cookies`
+   * 里 `wr_vid` / `wr_skey` / `wr_rt` 仍然在（`is_httponly=1`，更新于登录那一刻）。
+   * `clearStorageData({ origin })` 按 origin 过滤**删不掉** `domain=.weread.qq.com` 这类域 cookie，
+   * 于是插件一登出、只要再读一次 session，旧登录态就被重新捞回来 —— 用户看到的就是「登不干净」。
+   *
+   * 所以这里逐个 `cookies.remove(url, name)` 显式删除，再清站点存储（localStorage/IndexedDB/
+   * Service Worker/缓存），最后回读一次确认。
+   */
+  private async wipeWereadSession(): Promise<{ removed: number; left: number }> {
+    const session = electronModule()?.remote?.session?.defaultSession;
+    const store = session?.cookies;
+    let removed = 0;
+    const urls = ['https://weread.qq.com/', 'https://i.weread.qq.com/'];
+    try {
+      if (store?.get && store.remove) {
+        const names = new Set<string>();
+        for (const filter of [
+          { url: 'https://weread.qq.com/' },
+          { domain: '.weread.qq.com' },
+          { domain: 'weread.qq.com' },
+        ]) {
+          const list = (await store.get(filter).catch(() => [])) ?? [];
+          for (const c of list) names.add(c.name);
+        }
+        for (const name of names) {
+          for (const url of urls) {
+            try {
+              await store.remove(url, name);
+            } catch {
+              /* 该 url 下没有这个 cookie 时也会抛，忽略 */
+            }
+          }
+          removed++;
+        }
+      }
+    } catch {
+      /* 非 Electron 环境 */
+    }
+    try {
+      for (const origin of ['https://weread.qq.com', 'https://i.weread.qq.com']) {
+        await session?.clearStorageData?.({
+          origin,
+          storages: ['cookies', 'localstorage', 'indexeddb', 'cachestorage', 'serviceworkers', 'websql'],
+        });
+      }
+    } catch {
+      /* noop */
+    }
+    const left = (await this.readCookiesFromRemote().catch(() => null)) || '';
+    return { removed, left: left ? left.split(';').length : 0 };
+  }
+
   async logout(): Promise<void> {
     // 正在盯采就先停掉，否则空 cookie 的轮询会刷一堆 -2012 错误
     if (this.timer !== null) this.stopWatch(false);
-    try {
-      // 运行时按需加载 electron 模块：静态 import 会在移动端直接崩
-      const session = electronModule()?.remote?.session?.defaultSession;
-      if (session?.clearStorageData) {
-        await session.clearStorageData({ origin: 'https://weread.qq.com', storages: ['cookies'] });
-      }
-    } catch {
-      /* 非 Electron 环境跳过 */
-    }
+    // 浏览器会话不清干净，登出就是假的：随便读一次 session 旧登录态就回来了
+    const wiped = await this.wipeWereadSession().catch(() => ({ removed: 0, left: 0 }));
     this.settings.cookie = '';
     this.settings.wereadApiKey = '';
     this.settings.loginProfile = undefined;
@@ -1025,7 +1075,16 @@ export default class WereadMpCatcher extends Plugin {
     await this.saveAll();
     this.renderStatus();
     this.notifyViews(); // 立刻清掉旧账号的头像 / 昵称 / 订阅列表残影
+    this.settingsRefresh?.(); // 设置页也要当场重绘，否则还挂着旧头像 / 昵称
     this.emitWatch();
+    if (wiped.left > 0) {
+      // 不假装干净：清不掉就直说，别让用户以为已经登出
+      new Notice(
+        `浏览器会话里还留着 ${wiped.left} 项微信读书 cookie（已尝试删除 ${wiped.removed} 项）。` +
+          '请重启 Obsidian 后再退出一次，或手动在插件里重新扫码覆盖。',
+        14000,
+      );
+    }
   }
 
   /** 退出登录（命令面板 / 顶部按钮 / 设置页共用）：清干净后让用户自己重新扫码 */
@@ -1035,7 +1094,7 @@ export default class WereadMpCatcher extends Plugin {
       return;
     }
     await this.logout();
-    new Notice('已退出微信读书账号：本机登录态、书架缓存、头像都已清空，可以重新扫码登录了。', 8000);
+    new Notice('已退出：插件凭据、书架缓存、头像，以及 Obsidian 浏览器会话里的微信读书登录态都已清空。', 8000);
   }
 
   /**
@@ -2576,6 +2635,8 @@ class WMSettingTab extends PluginSettingTab {
   }
 
   private renderBody(containerEl: HTMLElement): void {
+    // 让插件在任何状态变更后都能立刻重绘设置页（登出后别再挂着旧昵称/头像）
+    this.plugin.settingsRefresh = () => this.refreshUI();
 
     /* 1. 登录 */
     containerEl.createDiv({ cls: 'wmc-settings-h', text: '登录' });

@@ -44,6 +44,8 @@ export interface CookieItem {
 export interface SessionLike {
   cookies?: {
     get?: (filter: { domain?: string; url?: string }) => Promise<CookieItem[] | undefined>;
+    /** 必须显式删：clearStorageData 用 origin 过滤**删不掉** domain=.weread.qq.com 这类域 cookie */
+    remove?: (url: string, name: string) => Promise<void>;
   };
   clearStorageData?: (opts: Record<string, unknown>) => Promise<void>;
 }
