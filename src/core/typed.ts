@@ -43,13 +43,25 @@ export interface CookieItem {
 
 export interface SessionLike {
   cookies?: {
-    get?: (filter: { domain?: string }) => Promise<CookieItem[] | undefined>;
+    get?: (filter: { domain?: string; url?: string }) => Promise<CookieItem[] | undefined>;
   };
   clearStorageData?: (opts: Record<string, unknown>) => Promise<void>;
 }
 
+/** Electron 主进程里创建的窗口（remote.BrowserWindow） */
+export interface RemoteWindowLike {
+  loadURL(url: string): Promise<void>;
+  close(): void;
+  isDestroyed?(): boolean;
+}
+
 export interface ElectronModule {
-  remote?: { session?: { defaultSession?: SessionLike } };
+  remote?: {
+    session?: { defaultSession?: SessionLike };
+    // 对齐 zhaohongxuan/obsidian-weread-plugin 的登录实现：真实窗口 + session.cookies
+    BrowserWindow?: new (opts: Record<string, unknown>) => RemoteWindowLike;
+    getCurrentWindow?: () => unknown;
+  };
 }
 
 /** 运行时可用的 node require（Electron 注入；沙箱/移动端可能没有） */

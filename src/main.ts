@@ -33,6 +33,7 @@ import type { BfItem, BfProgress, BfResult } from './core/bf';
 import {
   childProcessModule,
   createWebviewElement,
+  RemoteWindowLike,
   electronModule,
   isArr,
   isObj,
@@ -260,6 +261,8 @@ export default class WereadMpCatcher extends Plugin {
   private loginPolling = false;
   /** 当前打开的扫码弹窗（单例） */
   private loginModal: Modal | null = null;
+  /** 真实的 Electron 登录窗口（能拿到 HttpOnly cookie） */
+  private loginWin: RemoteWindowLike | null = null;
   private statusEl: HTMLElement | null = null;
 
   private watch: WatchStatus = {
@@ -519,7 +522,7 @@ export default class WereadMpCatcher extends Plugin {
     this.addCommand({
       id: 'open-login',
       name: '扫码登录微信读书（内嵌窗口）',
-      callback: () => this.startIframeLogin(),
+      callback: () => this.startQrLogin(),
     });
     this.addCommand({
       id: 'logout-account',
@@ -1036,6 +1039,86 @@ export default class WereadMpCatcher extends Plugin {
   }
 
   /**
+   * 真实窗口登录：对齐 zhaohongxuan/obsidian-weread-plugin（MIT, 2.3k stars）的做法 ——
+   * `require('electron').remote` → `new BrowserWindow()` → 读 `webContents.session.cookies`。
+   *
+   * 关键差别：session.cookies 能拿到 **HttpOnly** 的 wr_vid / wr_skey / wr_rt；
+   * 内嵌 webview 里的 `document.cookie` 永远拿不到它们（2026-10-19 实测 is_httponly=1），
+   * 这正是「扫码了却一直提示还缺 wr_vid/wr_skey/wr_rt」的根因。
+   *
+   * 返回 false 表示宿主没有 remote（被裁掉 / 移动端），调用方退回内嵌 webview。
+   */
+  private async startRemoteLogin(): Promise<boolean> {
+    const remote = electronModule()?.remote;
+    const RemoteWindow = remote?.BrowserWindow;
+    if (!RemoteWindow) return false;
+    let win: RemoteWindowLike;
+    try {
+      win = new RemoteWindow({
+        parent: remote?.getCurrentWindow?.(),
+        width: 960,
+        height: 560,
+        title: '登录微信读书',
+      });
+      this.loginWin = win;
+      // #login 让登录面板（二维码）直接展开，省得用户自己找入口
+      await win.loadURL('https://weread.qq.com/#login').catch(() => undefined);
+    } catch {
+      return false;
+    }
+
+    this.loginPolling = true;
+    void (async () => {
+      const t0 = Date.now();
+      while (this.loginPolling && Date.now() - t0 < 6 * 60 * 1000) {
+        await sleep(1500);
+        const ck = await this.readCookiesFromRemote();
+        if (!ck || !checkCookie(ck).ok) continue;
+        this.settings.cookie = ck;
+        this.settings.useSession = false;
+        const probe = await this.verifyCookieLive(false).catch(() => null);
+        const alive = !!probe && (probe.verdict === 'ok' || probe.verdict === 'restricted');
+        if (!alive) continue;
+        this.loginPolling = false;
+        try {
+          if (!win.isDestroyed?.()) win.close();
+        } catch {
+          /* 用户已手动关闭 */
+        }
+        this.loginWin = null;
+        const key = await this.refreshApiKey().catch(() => null);
+        const prof = await this.refreshProfile().catch(() => null);
+        const n = await this.syncAccountsFromShelf().catch(() => 0);
+        const web = await this.checkWebLogin().catch(() => ({ ok: false, msg: '未知' }));
+        this.notifyViews();
+        this.renderStatus();
+        this.emitWatch();
+        new Notice(
+          `登录成功${prof?.name ? `：${prof.name}` : ''}${key ? ' · 已换出官方 Key' : ''}${
+            n ? ` · 书架 ${n} 个` : ''
+          }${web.ok ? ' · 列表可用' : ` · 列表仍不通：${web.msg}`}`,
+          web.ok ? 10000 : 16000,
+        );
+        return;
+      }
+    })();
+    return true;
+  }
+
+  /** 从 defaultSession 读 cookie（含 HttpOnly；内嵌 webview 与真实窗口都落在这里） */
+  private async readCookiesFromRemote(): Promise<string | null> {
+    try {
+      const cookies = electronModule()?.remote?.session?.defaultSession?.cookies;
+      if (!cookies?.get) return null;
+      const list = (await cookies.get({ url: 'https://weread.qq.com/' })) ?? [];
+      if (!list.length) return null;
+      return normalizeCookie(list.map((c) => `${c.name}=${c.value}`).join('; '));
+    } catch {
+      return null;
+    }
+  }
+
+  /**
    * 内嵌扫码登录。
    *
    * 教训 1（Windows 点扫码却跳系统浏览器）：不能用 window.open 开 weread.qq.com ——
@@ -1174,7 +1257,7 @@ export default class WereadMpCatcher extends Plugin {
       // 挂载完成、下一帧再设 src —— 游离状态下设 src 会让部分 Electron 版本渲染白框
       window.requestAnimationFrame(() => {
         try {
-          el.setAttribute('src', 'https://weread.qq.com/');
+          el.setAttribute('src', 'https://weread.qq.com/#login');
         } catch (err) {
           showDiag(`设置登录页地址失败：${String(err).slice(0, 120)}`);
         }
@@ -1199,10 +1282,14 @@ export default class WereadMpCatcher extends Plugin {
       } catch {
         /* 页面还没加载完 */
       }
+      // ① 真实 session（含 HttpOnly，最正）
+      const fromSession = (await self.readCookiesFromRemote().catch(() => null)) || '';
+      // ② Obsidian 的 Chromium cookie 库（remote 不可用时的等价来源）
       const fromStore = (await self.readCookiesFromStore().catch(() => null)) || '';
-      if (!fromStore) return normalizeCookie(fromJs);
-      if (!fromJs) return normalizeCookie(fromStore);
-      return normalizeCookie(self.mergeCookies(fromStore, fromJs));
+      const base = fromSession || fromStore;
+      if (!base) return normalizeCookie(fromJs);
+      if (!fromJs) return normalizeCookie(base);
+      return normalizeCookie(self.mergeCookies(base, fromJs));
     }
 
     async function finish(): Promise<boolean> {
@@ -1731,7 +1818,10 @@ export default class WereadMpCatcher extends Plugin {
    * session 里，插件侧（requestUrl / electron.remote）根本读不到，必须走内嵌 webview 窗口。
    */
   startQrLogin(): void {
-    this.startIframeLogin();
+    void (async () => {
+      if (await this.startRemoteLogin()) return;
+      this.startIframeLogin();
+    })();
   }
 
   cancelQrLogin(): void {
@@ -2549,7 +2639,7 @@ class WMSettingTab extends PluginSettingTab {
       {
         text: st === 'full' ? '重新扫码' : '扫码登录',
         cta: true,
-        onClick: () => this.plugin.startIframeLogin(),
+        onClick: () => this.plugin.startQrLogin(),
       },
     ];
     if (st !== 'none') {

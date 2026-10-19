@@ -217,7 +217,7 @@ npm test         # 核心逻辑单测（需先构建 dist/core）
 ## 致谢
 
 - 交互与阅读面范式参考 [`joeseesun/qiaomu-ai-rss`](https://github.com/joeseesun/qiaomu-ai-rss)（GPL-3.0-only）
-- 微信读书接口实践参考 [`zhaohongxuan/obsidian-weread-plugin`](https://github.com/zhaohongxuan/obsidian-weread-plugin)（MIT）
+- 微信读书接口与登录方式参考 [`zhaohongxuan/obsidian-weread-plugin`](https://github.com/zhaohongxuan/obsidian-weread-plugin)（MIT）：扫码登录采用同一条路线 —— `electron.remote` 打开真实窗口，读 `webContents.session.cookies`（只有它能拿到 HttpOnly 的 `wr_skey`）
 
 ## Star History
 
