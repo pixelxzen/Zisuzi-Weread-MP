@@ -1,8 +1,8 @@
+# Zisuzi-Weread-MP
+
 <div align="center">
   <img src="assets/hero.jpg" alt="Zisuzi-Weread-MP · 微信读书公众号盯采" width="100%" />
 </div>
-
-<h1 align="center">Zisuzi-Weread-MP</h1>
 
 <p align="center">
   <img src="assets/logo.svg" alt="Zisuzi-Weread-MP" width="420" />
