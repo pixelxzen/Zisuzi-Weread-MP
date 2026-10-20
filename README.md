@@ -10,6 +10,20 @@
   <b>微信读书公众号盯采</b> · 一次扫码，把你书架里订阅的公众号文章，自动搬进 Obsidian。
 </p>
 
+## English
+
+**Zisuzi-Weread-MP** archives every article from the WeChat Official Account (公众号) feeds on your WeRead shelf into your Obsidian vault as Markdown, with images downloaded locally.
+
+- **One scan, then it runs itself.** Log in once with a QR code; the plugin keeps the session and polls on the schedule you choose.
+- **Pick your accounts.** It reads everything on your WeRead shelf, you tick the ones to follow.
+- **Everything stays local.** Notes, frontmatter (`source: weread://<id>`) and images live in your vault. No server, no cloud.
+- **Built to stay under the radar.** Conservative request pacing, per-account daily budgets, and a shared throttle window so it never fights another archiver.
+- **Agent friendly.** A companion skill pack lets Claude Code, Codex, Hermes and Cursor read, audit and extend your archive.
+
+Full English guide: **[README_EN.md](README_EN.md)**
+
+---
+
 <p align="center">
   <a href="README_EN.md">English</a> ·
   <a href="#三分钟上手">快速开始</a> ·
