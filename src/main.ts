@@ -92,6 +92,33 @@ export interface WMSettings {
   agentDocked: boolean;
   /** true = 用 Obsidian 自带 session 的登录态（不手动传 Cookie） */
   useSession?: boolean;
+  /**
+   * 用户手动点过「退出登录」后置 true：期间 autoDetectSession / http 兜底都不许把
+   * Obsidian 浏览器会话里的旧登录态再捞回来，否则「退出」永远退不干净。
+   * 下次扫码登录成功时清掉。
+   */
+  sessionOptOut?: boolean;
+  /** 最近一次退出登录的实证结果（设置页直接展示，不靠猜） */
+  lastWipe?: {
+    at: number;
+    removed: number;
+    leftSession: number;
+    leftDisk: string[];
+    serverLoggedOut: boolean | null;
+    msg: string;
+  };
+  /**
+   * 风控冷却闸。-2041（公众号接口对该账号受限）与 -2012（登录过期）都必须让插件
+   * 停止继续打接口：撞一次就冷却，否则每 30 分钟自动更新、每点一次公众号列表都在
+   * 加重风控，-2041 会升级成 -2012，越清越糟。
+   */
+  riskBlock?: { code: number; at: number; until: number };
+  /** 连续撞风控次数（成功抓一次清零）：撞得越多冷却越久（指数退避） */
+  riskStrikes?: number;
+  /** 今日请求用量（按自然日重置）：事前硬预算，别让账号再被跑成 -2041 */
+  quota?: { day: string; list: number; content: number };
+  /** 一次性迁移标记（450 = v4.5.0 把旧的 30 分钟/8 篇改成安全值，只执行一次） */
+  migrations?: number;
   /** 最近一次实测的网页登录态（列表/正文用），undefined = 没测过 */
   webLoginOk?: boolean;
   webLoginAt?: number;
@@ -170,6 +197,23 @@ const DEFAULTS: WMSettings = {
 };
 
 const MIN_INTERVAL = 15; // 风控下限：低于 15 分钟不进风控红线
+
+/**
+ * 预算耗尽 —— 这是插件自己踩刹车，不是微信读书的风控。
+ * 必须单独一个类型：混进 RiskError 会被 UI 报成「登录过期」，用户就会去重扫码，
+ * 越弄越乱（这正是之前最误导人的那条提示的来源）。
+ */
+class BudgetError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'BudgetError';
+  }
+}
+
+/** 每账号每天的列表请求预算（社区实测安全线约「10 个号 × 每天 2 次」） */
+const LIST_QUOTA_PER_ACCOUNT = 20;
+/** 每账号每天的正文抓取预算 */
+const CONTENT_QUOTA_PER_ACCOUNT = 20;
 
 const sleep = (ms: number) => new Promise<void>((r) => window.setTimeout(r, ms));
 
@@ -355,6 +399,8 @@ export default class WereadMpCatcher extends Plugin {
   }
 
   private http: HttpFn = async (url: string, headers: Record<string, string>) => {
+    // 出站第一道闸：预算。放在 http 层才不会漏路径（翻页/补抓/批量归档都走这里）
+    this.quotaTick(url);
     const useSession = !!this.settings.useSession;
     const h1: Record<string, string> = { ...headers };
     if (useSession) {
@@ -374,8 +420,9 @@ export default class WereadMpCatcher extends Plugin {
     try {
       const r2 = await this.rawHttp(url, h2);
       if (this.respOk(r2)) {
-        // 兜底成功 → 记住哪种方式可用
-        this.settings.useSession = !useSession;
+        // 兜底成功 → 记住哪种方式可用；但用户主动退过登录时不许在这里偷偷切回
+        // 浏览器会话，否则下一次请求又把旧账号捞回来
+        if (!this.settings.sessionOptOut) this.settings.useSession = !useSession;
         return r2;
       }
     } catch {
@@ -599,7 +646,9 @@ export default class WereadMpCatcher extends Plugin {
 
     this.addSettingTab(new WMSettingTab(this.app, this));
 
-    if (this.settings.autoStart) this.startWatch(false);
+    // 上次被风控冷却中 → 先不自动开盯采，否则一重启就再撞一次
+    if (this.settings.autoStart && this.riskCooldownMin() === 0) this.startWatch(false);
+    else if (this.settings.autoStart) this.renderStatus();
   }
 
   onunload() {
@@ -615,6 +664,14 @@ export default class WereadMpCatcher extends Plugin {
     this.settings = { ...DEFAULTS, ...(raw?.settings ?? {}) };
     this.state = raw?.state ?? { processed: {} };
     if (!this.state.processed) this.state.processed = {};
+    // v4.5.0 一次性迁移：老版本默认「每 30 分钟一轮 × 每轮 8 篇」，3 个号一天就是
+    // 上百次列表请求 —— 这正是 -2041 的根因。只迁移一次，之后用户自己怎么调都行。
+    if ((this.settings.migrations ?? 0) < 450) {
+      if (!this.settings.intervalMin || this.settings.intervalMin < 120) this.settings.intervalMin = 240;
+      if (!this.settings.maxPerRun || this.settings.maxPerRun > 3) this.settings.maxPerRun = 3;
+      this.settings.migrations = 450;
+      void this.saveAll();
+    }
   }
 
   async saveAll() {
@@ -864,7 +921,14 @@ export default class WereadMpCatcher extends Plugin {
       } catch (e) {
         if (e instanceof RiskError) {
           t.hide();
-          new Notice(`命中风控，已停止下载（成功 ${ok} 篇）`, 9000);
+          this.markRisk(e.code);
+          this.riskNotice(e);
+          new Notice(`已停止下载（成功 ${ok} 篇）`, 9000);
+          break;
+        }
+        if (e instanceof BudgetError) {
+          t.hide();
+          new Notice(`${e.message}（本轮已成功 ${ok} 篇）`, 12000);
           break;
         }
         fail++;
@@ -891,6 +955,13 @@ export default class WereadMpCatcher extends Plugin {
     if (!acc?.bookId) return 0;
     const cookie = normalizeCookie(this.settings.cookie || '');
     if (!this.hasLogin()) return 0;
+    // 冷却期内一律不打接口：每点一次公众号、每轮自动更新都在加重风控，
+    // -2041 会因此升级成 -2012（账号被判会话失效），越救越糟。
+    const cd = this.riskCooldownMin();
+    if (cd > 0) {
+      new Notice(`风控冷却中：还需 ${cd} 分钟（${this.settings.riskBlock?.code ?? ''}）。这期间刷新不会成功，别再点。`, 8000);
+      return 0;
+    }
     const client = new WereadClient(this.http, cookie);
     if (!this.state.discovered) this.state.discovered = {};
     if (!this.state.accountOffsets) this.state.accountOffsets = {};
@@ -917,13 +988,17 @@ export default class WereadMpCatcher extends Plugin {
         this.state.accountDone[acc.name] = true;
       }
       if (added || reset) await this.saveAll();
+      this.noteRiskCleared(); // 能拉到列表 = 账号没被限，把「连续撞墙次数」清零
       this.notifyViews();
       if (reset && added) new Notice(`「${name}」首批 ${items.length} 篇已就绪，往下滚继续加载`, 5000);
       return items.length;
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       if (e instanceof RiskError) {
-        new Notice(`登录过期了（-2012）：去设置 → 切换账号重新扫码，就能继续加载`, 10000);
+        this.markRisk(e.code);
+        this.riskNotice(e, name);
+      } else if (e instanceof BudgetError) {
+        new Notice(msg, 12000);
       } else {
         new Notice(`加载「${name}」失败：${msg}`, 7000);
       }
@@ -953,7 +1028,12 @@ export default class WereadMpCatcher extends Plugin {
       try {
         items = await client.listArticles(acc.bookId, offset);
       } catch (e) {
-        if (e instanceof RiskError) new Notice('登录过期了，去设置里重新扫码', 9000);
+        if (e instanceof RiskError) {
+          this.markRisk(e.code);
+          this.riskNotice(e, name);
+        } else if (e instanceof BudgetError) {
+          new Notice(e.message, 10000);
+        }
         break;
       }
       if (!items.length) break;
@@ -1002,11 +1082,39 @@ export default class WereadMpCatcher extends Plugin {
    * 所以这里逐个 `cookies.remove(url, name)` 显式删除，再清站点存储（localStorage/IndexedDB/
    * Service Worker/缓存），最后回读一次确认。
    */
-  private async wipeWereadSession(): Promise<{ removed: number; left: number }> {
+  private async wipeWereadSession(): Promise<{ removed: number; leftSession: number; leftDisk: string[] }> {
     const session = electronModule()?.remote?.session?.defaultSession;
     const store = session?.cookies;
     let removed = 0;
-    const urls = ['https://weread.qq.com/', 'https://i.weread.qq.com/'];
+    const tried = new Set<string>();
+
+    // ① 全量取该 session 的所有 cookie，按域名筛。
+    //    比 `{ url }` / `{ domain }` 过滤更不容易漏：domain=.weread.qq.com + path=/web/xxx
+    //    这类组合用 url 过滤时会静默漏删，而它们正是 wr_skey 的藏身处。
+    const hits = await this.listWereadSessionCookies();
+    for (const c of hits) {
+      const host = (c.domain || 'weread.qq.com').replace(/^\./, '');
+      const path = c.path || '/';
+      // Electron 的 remove(url, name) 要求 url 精确匹配 domain/path/secure：真身 + 兜底各试一遍
+      for (const url of [
+        c.url || `https://${host}${path}`,
+        `https://${host}/`,
+        `https://i.weread.qq.com${path}`,
+        'https://weread.qq.com/',
+      ]) {
+        const key = `${url}|${c.name}`;
+        if (tried.has(key)) continue;
+        tried.add(key);
+        try {
+          await store?.remove?.(url, c.name);
+          removed++;
+        } catch {
+          /* 该 url 下没有这个 cookie 时也会抛，忽略 */
+        }
+      }
+    }
+
+    // ② 兜底：老路子按 filter 枚举（应对某些 Electron 版本 cookies.get({}) 不给全量）
     try {
       if (store?.get && store.remove) {
         const names = new Set<string>();
@@ -1014,24 +1122,26 @@ export default class WereadMpCatcher extends Plugin {
           { url: 'https://weread.qq.com/' },
           { domain: '.weread.qq.com' },
           { domain: 'weread.qq.com' },
+          { domain: 'i.weread.qq.com' },
         ]) {
           const list = (await store.get(filter).catch(() => [])) ?? [];
           for (const c of list) names.add(c.name);
         }
         for (const name of names) {
-          for (const url of urls) {
+          for (const url of ['https://weread.qq.com/', 'https://i.weread.qq.com/']) {
             try {
               await store.remove(url, name);
             } catch {
-              /* 该 url 下没有这个 cookie 时也会抛，忽略 */
+              /* 忽略 */
             }
           }
-          removed++;
         }
       }
     } catch {
       /* 非 Electron 环境 */
     }
+
+    // ③ 清站点存储：localStorage / IndexedDB / SW 里也留着登录痕迹，不清会「看着像没退」
     try {
       for (const origin of ['https://weread.qq.com', 'https://i.weread.qq.com']) {
         await session?.clearStorageData?.({
@@ -1042,18 +1152,115 @@ export default class WereadMpCatcher extends Plugin {
     } catch {
       /* noop */
     }
-    const left = (await this.readCookiesFromRemote().catch(() => null)) || '';
-    return { removed, left: left ? left.split(';').length : 0 };
+
+    // ④ 关键：把删除落盘。不 flushStore 时内存删了、磁盘 Cookies 库里的旧行还在，
+    //    下一次 readCookiesFromStore() 又把 wr_vid/wr_skey/wr_rt 读回来 ——
+    //    这正是「退出了、一刷新又登录着」的物理原因。
+    try {
+      await store?.flushStore?.();
+    } catch {
+      /* 老 Electron 没有这个方法 */
+    }
+    await sleep(350);
+
+    const leftSession = (await this.listWereadSessionCookies()).length;
+    let leftDisk: string[] = [];
+    try {
+      leftDisk = await this.readCookieNamesFromStore();
+    } catch {
+      /* 读不到就当没有 */
+    }
+    return { removed, leftSession, leftDisk };
   }
 
-  async logout(): Promise<void> {
+  /** 会话里现存的 weread cookie（含 HttpOnly 的 wr_vid/wr_skey/wr_rt） */
+  private async listWereadSessionCookies(): Promise<CookieItem[]> {
+    try {
+      const store = electronModule()?.remote?.session?.defaultSession?.cookies;
+      const all = (await store?.get?.({})) ?? [];
+      return all.filter((c) => /(^|\.)weread\.qq\.com$/i.test(c.domain || ''));
+    } catch {
+      return [];
+    }
+  }
+
+  /** 磁盘 cookie 库里现存的 weread 键名（登出是否真落盘的证据） */
+  private async readCookieNamesFromStore(): Promise<string[]> {
+    const rows = await this.cookieDbQuery(
+      "SELECT name FROM cookies WHERE host_key LIKE '%weread.qq.com' AND length(value) > 0;",
+    );
+    return [...new Set(rows)].sort();
+  }
+
+  /**
+   * 硬验证：用 Obsidian 浏览器会话（此时 cookie 已清空）去打微信读书的用户端点。
+   * true  = 服务端也不认这个会话了（-2010 用户不存在）→ 网页端确实退出了
+   * false = 服务端仍认（说明清得不干净）
+   * null  = 这个 Electron 版本没有 session.fetch，无法验证（退回 cookie 计数判断）
+   */
+  private async verifySessionLoggedOut(vid: string): Promise<boolean | null> {
+    const session = electronModule()?.remote?.session?.defaultSession;
+    if (!session?.fetch) return null;
+    try {
+      const r = await session.fetch(`https://weread.qq.com/web/user?userVid=${vid || '0'}`, {
+        headers: { Referer: 'https://weread.qq.com/', Accept: 'application/json, text/plain, */*' },
+      });
+      const txt = await r.text();
+      if (/-2010|-2003/.test(txt) || /用户不存在/.test(txt)) return true;
+      // 只有明确看到「用户档案」才算服务端仍认这个会话；其他响应一律当「验证不了」，
+      // 免得拿一次空响应误报「退出失败」吓用户。
+      if (/"userVid"\s*:\s*\d+/.test(txt) && /"name"\s*:/.test(txt)) return false;
+      return null;
+    } catch {
+      return null;
+    }
+  }
+
+  /** 关掉所有可能把 cookie 续期写回来的登录表面（扫码 modal / 远程 BrowserWindow） */
+  private closeLoginSurfaces(): void {
+    this.loginPolling = false;
+    try {
+      this.loginModal?.close();
+    } catch {
+      /* 用户已手动关闭 */
+    }
+    this.loginModal = null;
+    try {
+      const w = this.loginWin;
+      if (w && !w.isDestroyed?.()) w.close();
+    } catch {
+      /* noop */
+    }
+    this.loginWin = null;
+  }
+
+  async logout(): Promise<NonNullable<WMSettings['lastWipe']>> {
     // 正在盯采就先停掉，否则空 cookie 的轮询会刷一堆 -2012 错误
     if (this.timer !== null) this.stopWatch(false);
+
+    // 先记住要验证的 vid（清空后就没了）
+    const rawCk = normalizeCookie(this.settings.cookie || '');
+    const vidFromCookie = (rawCk.split(';').map((x) => x.trim()).find((x) => x.startsWith('wr_vid=')) || '').slice(7);
+    const vid = (this.settings.loginProfile?.vid || vidFromCookie || '').trim();
+
+    // 关窗口必须在清 cookie 之前：扫码窗口还开着时，站点会周期性续期 wr_skey，
+    // 删掉之后又被页面写回来 —— 这是「退了但一看还是登录着」的第二个物理原因。
+    this.closeLoginSurfaces();
+
     // 浏览器会话不清干净，登出就是假的：随便读一次 session 旧登录态就回来了
-    const wiped = await this.wipeWereadSession().catch(() => ({ removed: 0, left: 0 }));
+    const wiped = await this.wipeWereadSession().catch(() => ({
+      removed: 0,
+      leftSession: -1,
+      leftDisk: [] as string[],
+    }));
+
     this.settings.cookie = '';
     this.settings.wereadApiKey = '';
     this.settings.loginProfile = undefined;
+    // 关掉 http 兜底的「session 自动接管」：不清这个，下次请求会自动回退到浏览器会话
+    this.settings.useSession = false;
+    // 防复活开关：autoDetectSession 看到它就闭嘴，否则重启 Obsidian 又自动登录回来
+    this.settings.sessionOptOut = true;
     // 网页登录态是上一次实测结果，登出后必须回到「未检测」，否则界面还显示正常
     this.settings.webLoginOk = undefined;
     this.settings.webLoginVerdict = undefined;
@@ -1062,6 +1269,8 @@ export default class WereadMpCatcher extends Plugin {
     // 切换账号必须清掉旧账号的书架/勾选/文章索引，否则两个账号数据混在一个视图里
     this.settings.accounts = [];
     this.settings.shelfAccounts = [];
+    // 换了账号，旧账号的风控冷却不该跟着走
+    this.settings.riskBlock = undefined;
     this.state.discovered = {};
     this.state.read = {};
     this.state.summaries = {};
@@ -1072,29 +1281,54 @@ export default class WereadMpCatcher extends Plugin {
     } catch {
       /* noop */
     }
+
+    // 硬验证：拿「已清空 cookie 的 Obsidian 会话」再打一次用户端点。
+    // 服务端回 -2010「用户不存在」= 网页端确实退出了，不是我们自以为清了。
+    const serverLoggedOut = await this.verifySessionLoggedOut(vid).catch(() => null);
+
+    const clean = wiped.leftSession <= 0 && wiped.leftDisk.length === 0;
+    const report: NonNullable<WMSettings['lastWipe']> = {
+      at: Date.now(),
+      removed: wiped.removed,
+      leftSession: Math.max(0, wiped.leftSession),
+      leftDisk: wiped.leftDisk,
+      serverLoggedOut,
+      msg: clean
+        ? serverLoggedOut === true
+          ? '浏览器会话已登出（服务端实测不认了，0 残留）'
+          : serverLoggedOut === false
+            ? '本地 cookie 已清空，但服务端仍认这个会话 —— 请重启 Obsidian 后再退一次'
+            : '浏览器会话已清空（本版 Electron 无法做服务端验证）'
+        : `会话残留 ${Math.max(0, wiped.leftSession)} 项${wiped.leftDisk.length ? ` · 磁盘残留 ${wiped.leftDisk.join('/')}` : ''}`,
+    };
+    this.settings.lastWipe = report;
+
     await this.saveAll();
     this.renderStatus();
     this.notifyViews(); // 立刻清掉旧账号的头像 / 昵称 / 订阅列表残影
     this.settingsRefresh?.(); // 设置页也要当场重绘，否则还挂着旧头像 / 昵称
     this.emitWatch();
-    if (wiped.left > 0) {
+
+    if (!clean) {
       // 不假装干净：清不掉就直说，别让用户以为已经登出
       new Notice(
-        `浏览器会话里还留着 ${wiped.left} 项微信读书 cookie（已尝试删除 ${wiped.removed} 项）。` +
+        `浏览器会话里还留着 ${report.leftSession} 项微信读书 cookie（已尝试删除 ${wiped.removed} 项）。` +
           '请重启 Obsidian 后再退出一次，或手动在插件里重新扫码覆盖。',
         14000,
       );
     }
+    return report;
   }
 
   /** 退出登录（命令面板 / 顶部按钮 / 设置页共用）：清干净后让用户自己重新扫码 */
   async logoutAccount(): Promise<void> {
-    if (this.loginState() === 'none') {
-      new Notice('当前没有登录微信读书账号');
-      return;
-    }
-    await this.logout();
-    new Notice('已退出：插件凭据、书架缓存、头像，以及 Obsidian 浏览器会话里的微信读书登录态都已清空。', 8000);
+    const r = await this.logout();
+    if (r.leftSession > 0 || r.leftDisk.length > 0) return; // logout 里已经给过「清不干净」的提示
+    new Notice(
+      `已退出：插件凭据、官方 Key、书架缓存、头像，以及 Obsidian 里的微信读书登录态都已清空` +
+        `${r.serverLoggedOut === true ? '（服务端实测已不认这个会话）' : ''}。现在点「扫码登录」就是全新扫码。`,
+      9000,
+    );
   }
 
   /**
@@ -1139,6 +1373,8 @@ export default class WereadMpCatcher extends Plugin {
         const alive = !!probe && (probe.verdict === 'ok' || probe.verdict === 'restricted');
         if (!alive) continue;
         this.loginPolling = false;
+        this.settings.sessionOptOut = false; // 新登录已生效，解除「不许自动捞会话」的闸
+        this.settings.riskBlock = undefined; // 新会话重新判定风控，不沿用旧冷却
         try {
           if (!win.isDestroyed?.()) win.close();
         } catch {
@@ -1363,6 +1599,10 @@ export default class WereadMpCatcher extends Plugin {
       lastLiveProbe = Date.now();
       const changed = baseline !== '' && str !== baseline;
 
+      const prevCookie = self.settings.cookie;
+      const prevUseSession = !!self.settings.useSession;
+      // 探针只能读 settings.cookie，所以先临时挂上；验证不通过就还原 ——
+      // 否则一份过期 cookie 会被写进设置，界面永远显示「登录不完整 / 已失效」。
       self.settings.cookie = str;
       self.settings.useSession = false;
       const probe = await self.verifyCookieLive(false).catch(() => null);
@@ -1370,6 +1610,9 @@ export default class WereadMpCatcher extends Plugin {
       // 这种情况扫码也救不了，必须当成功收工，并在 Notice 里说清是限流而不是没登录。
       const alive = !!probe && (probe.verdict === 'ok' || probe.verdict === 'restricted');
       if (!alive) {
+        self.settings.cookie = prevCookie;
+        self.settings.useSession = prevUseSession;
+        await self.saveAll().catch(() => undefined);
         status.setText(
           changed
             ? `已拿到 Cookie，但接口还不通（${probe ? probe.hint : '无响应'}）：点「我已经扫码了，立即同步」重试`
@@ -1383,6 +1626,8 @@ export default class WereadMpCatcher extends Plugin {
     async function succeed(): Promise<boolean> {
       finished = true;
       self.loginPolling = false;
+      self.settings.sessionOptOut = false; // 新登录已生效，解除「不许自动捞会话」的闸
+      self.settings.riskBlock = undefined; // 新会话重新判定风控，不沿用旧冷却
       timers.length = 0;
       status.setText('登录成功，正在同步…');
       try {
@@ -1479,6 +1724,9 @@ export default class WereadMpCatcher extends Plugin {
   /** 启动自检：没有 cookie 但 Obsidian session 里已登录 → 自动切 session 模式 */
   async autoDetectSession(): Promise<void> {
     if (this.hasLogin()) return;
+    // 用户主动退过登录就别再自动捞：不设这道闸，重启 Obsidian 会把浏览器会话里的
+    // 旧登录态重新变成 useSession=true，退出登录等于白点。
+    if (this.settings.sessionOptOut) return;
     try {
       if (!(await this.probeSessionLogin())) return;
       this.settings.useSession = true;
@@ -1517,6 +1765,122 @@ export default class WereadMpCatcher extends Plugin {
       await this.saveAll();
       return { ok: false, msg };
     }
+  }
+
+  /* -------------------------------- 请求预算 ------------------------------- */
+
+  /** 今日用量（跨自然日自动归零） */
+  private quotaToday(): { day: string; list: number; content: number } {
+    const day = ymdNow();
+    let q = this.settings.quota;
+    if (!q || q.day !== day) {
+      q = { day, list: 0, content: 0 };
+      this.settings.quota = q;
+    }
+    return q;
+  }
+
+  /** 今日预算上限：按选中的号数给，号越多额度越多，但每号仍受安全线约束 */
+  quotaLimits(): { list: number; content: number } {
+    const n = Math.max(1, this.settings.accounts.length || 1);
+    return { list: n * LIST_QUOTA_PER_ACCOUNT, content: n * CONTENT_QUOTA_PER_ACCOUNT };
+  }
+
+  /** 今日用量摘要（设置页展示用，人话） */
+  quotaSummary(): string {
+    const q = this.quotaToday();
+    const lim = this.quotaLimits();
+    return `今日已用：列表 ${q.list}/${lim.list} · 正文 ${q.content}/${lim.content}`;
+  }
+
+  /**
+   * 所有出站请求都从这里过：列表/正文各记一笔，超预算直接抛 BudgetError。
+   * 放在 http 层而不是各个业务函数里，是为了不漏路径（翻页、补抓、批量归档都经过这里）。
+   */
+  private quotaTick(url: string): void {
+    const isList = /\/web\/mp\/articles/.test(url);
+    const isContent = /\/web\/(?:mp\/)?review\/detail/.test(url);
+    if (!isList && !isContent) return;
+    const q = this.quotaToday();
+    const lim = this.quotaLimits();
+    if (isList) {
+      if (q.list >= lim.list) {
+        throw new BudgetError(`今日列表请求已达上限（${q.list}/${lim.list}）：明天再看，或把「已选公众号」减少一些`);
+      }
+      q.list += 1;
+    } else {
+      if (q.content >= lim.content) {
+        throw new BudgetError(`今日正文请求已达上限（${q.content}/${lim.content}）：明天再抓，已归档的笔记不受影响`);
+      }
+      q.content += 1;
+    }
+    void this.saveAll();
+  }
+
+  /* ------------------------------ 风控冷却闸 ------------------------------ */
+
+  /** 冷却剩余分钟（0 = 没在冷却） */
+  riskCooldownMin(): number {
+    const b = this.settings.riskBlock;
+    if (!b) return 0;
+    const left = b.until - Date.now();
+    return left > 0 ? Math.ceil(left / 60000) : 0;
+  }
+
+  /** 撞到风控就记一笔并进入冷却；同一错误码 2 分钟内重复命中不重复写盘 */
+  markRisk(code: number): void {
+    const b = this.settings.riskBlock;
+    if (b && b.code === code && Math.abs(Date.now() - b.at) < 120000) return;
+    // 指数退避：连续撞墙时冷却翻倍（60 → 120 → 240 → 封顶 480 分钟）。
+    // 固定 1 小时对已经进「小黑屋」的账号太短，用户每小时试一次等于每小时再撞一次。
+    const strikes = (this.settings.riskStrikes ?? 0) + 1;
+    this.settings.riskStrikes = strikes;
+    const base = code === -2041 ? 60 : 15;
+    const mins = Math.min(480, base * Math.pow(2, Math.min(strikes - 1, 3)));
+    this.settings.riskBlock = { code, at: Date.now(), until: Date.now() + mins * 60000 };
+    void this.saveAll();
+    this.renderStatus();
+    this.emitWatch();
+  }
+
+  /** 抓取成功一次就把「连续撞墙次数」清零：别让一次风控永远拉长之后的冷却 */
+  noteRiskCleared(): void {
+    if (this.settings.riskStrikes) {
+      this.settings.riskStrikes = 0;
+      void this.saveAll();
+    }
+  }
+
+  clearRiskBlock(): void {
+    if (!this.settings.riskBlock) return;
+    this.settings.riskBlock = undefined;
+    void this.saveAll();
+    this.renderStatus();
+    this.emitWatch();
+  }
+
+  /**
+   * 统一风控提示。别再一律喊「登录过期去扫码」—— -2041 时扫码是白费力气，
+   * 用户照着做只会把风控撞得更重（这是之前界面上最误导人的一句）。
+   */
+  riskNotice(e: RiskError, where = ''): void {
+    const at = where ? `「${where}」` : '';
+    if (e.code === -2041) {
+      new Notice(
+        `${at}公众号接口受账号限制（-2041）：登录态本身有效，重扫码也不会好。` +
+          '手机微信读书 App 打开该公众号任一篇文章验证一次，或等 24 小时冷却。已暂停请求，避免风控加重。',
+        18000,
+      );
+      return;
+    }
+    if (e.code === -2012 || e.code === -2010) {
+      new Notice(
+        `${at}登录态失效（${e.code}）：去设置 → 扫码登录。已暂停请求 15 分钟，避免连环撞风控。`,
+        14000,
+      );
+      return;
+    }
+    new Notice(`${at}命中风控 ${e.code}：${e.message}`, 12000);
   }
 
   /** 网页登录态的一行摘要（给设置页/状态条用） */
@@ -1590,6 +1954,9 @@ export default class WereadMpCatcher extends Plugin {
       probe.verdict === 'ok' ? 'ok' : probe.verdict === 'restricted' ? 'restricted' : 'expired';
     this.settings.webLoginAt = stamp;
     this.settings.webLoginMsg = probe.hint;
+    // 探针命中 -2041 就进冷却：连打开设置页自动探测的那一次也算撞墙，
+    // 不进冷却的话界面会在后台反复探、反复加重风控。
+    if (probe.verdict === 'restricted') this.markRisk(-2041);
     await this.saveAll();
     this.notifyViews();
     if (notify) {
@@ -1615,12 +1982,22 @@ export default class WereadMpCatcher extends Plugin {
    * 所以只读查询即可，不需要解密。只取 weread 域几个键，查完删临时副本。
    */
   private async readCookiesFromStore(): Promise<string | null> {
+    const parts = await this.cookieDbQuery(
+      "SELECT name||'='||value FROM cookies WHERE host_key IN ('.weread.qq.com','weread.qq.com') " +
+        "AND length(value) > 0 AND name IN ('wr_vid','wr_skey','wr_rt','wr_gid','wr_ql','wr_fp','wr_localvid','wr_name','wr_avatar');",
+    );
+    if (!parts.length) return null;
+    return normalizeCookie(parts.join('; '));
+  }
+
+  /** 只读查询 Obsidian 的 Chromium cookie 库：复制一份 + sqlite3 查，绝不锁运行中的库 */
+  private async cookieDbQuery(sql: string): Promise<string[]> {
     const os = nodeOs();
     const cp = childProcessModule();
     const req = nodeRequire();
-    if (!os?.homedir || !cp?.spawn || !req) return null;
+    if (!os?.homedir || !cp?.spawn || !req) return [];
     const src = this.cookieDbPath();
-    if (!src) return null;
+    if (!src) return [];
 
     type FsLike = {
       existsSync?: (p: string) => boolean;
@@ -1631,9 +2008,9 @@ export default class WereadMpCatcher extends Plugin {
     try {
       fs = req<FsLike>('fs');
     } catch {
-      return null;
+      return [];
     }
-    if (!fs?.existsSync?.(src)) return null;
+    if (!fs?.existsSync?.(src)) return [];
 
     // 运行中的 Obsidian 会锁库：先复制一份（连 -wal 一起，否则读到旧快照）再查
     const tmp = `${src}.wmc-${Date.now()}.db`;
@@ -1641,14 +2018,11 @@ export default class WereadMpCatcher extends Plugin {
       fs.copyFileSync?.(src, tmp);
       if (fs.existsSync(`${src}-wal`)) fs.copyFileSync?.(`${src}-wal`, `${tmp}-wal`);
     } catch {
-      return null;
+      return [];
     }
 
     const platform = (window as unknown as { process?: { platform?: string } }).process?.platform ?? '';
     const sqlite = platform === 'darwin' ? '/usr/bin/sqlite3' : 'sqlite3';
-    const sql =
-      "SELECT name||'='||value FROM cookies WHERE host_key IN ('.weread.qq.com','weread.qq.com') " +
-      "AND length(value) > 0 AND name IN ('wr_vid','wr_skey','wr_rt','wr_gid','wr_ql','wr_fp','wr_localvid','wr_name','wr_avatar');";
 
     const out = await new Promise<string>((resolve) => {
       let buf = '';
@@ -1675,12 +2049,10 @@ export default class WereadMpCatcher extends Plugin {
       /* 清理失败不影响结果 */
     }
 
-    const parts = out
+    return out
       .split('\n')
       .map((l) => l.trim())
       .filter(Boolean);
-    if (!parts.length) return null;
-    return normalizeCookie(parts.join('; '));
   }
 
   /** Chromium cookie 库按平台的标准位置 */
@@ -1878,6 +2250,13 @@ export default class WereadMpCatcher extends Plugin {
    */
   startQrLogin(): void {
     void (async () => {
+      // 上一次退出若没清干净（或用户从浏览器/别处登录过），扫码窗口会直接显示
+      // 「已登录」而不给二维码。点「扫码登录」就等于要求重新扫码，所以这里先扫一遍
+      // 会话残留，有就静默清掉再开窗。
+      const leftover = await this.listWereadSessionCookies().catch(() => [] as CookieItem[]);
+      if (!this.hasLogin() && leftover.length) {
+        await this.wipeWereadSession().catch(() => undefined);
+      }
       if (await this.startRemoteLogin()) return;
       this.startIframeLogin();
     })();
@@ -1918,6 +2297,13 @@ export default class WereadMpCatcher extends Plugin {
 
   private renderStatus() {
     if (!this.statusEl) return;
+    // 风控冷却优先显示：这时点任何刷新都不会成功，必须让人一眼看到原因
+    const cd = this.riskCooldownMin();
+    if (cd > 0) {
+      const code = this.settings.riskBlock?.code ?? '';
+      this.statusEl.setText(`微信读书 ⏸ 风控冷却 ${cd} 分钟（${code}）`);
+      return;
+    }
     const last = this.state.lastRun;
     const watching = this.timer !== null;
     const icon = watching ? '●' : '○';
@@ -1934,6 +2320,12 @@ export default class WereadMpCatcher extends Plugin {
   async runOnce(manual: boolean) {
     if (this.running) {
       if (manual) new Notice('上一轮还在跑');
+      return;
+    }
+    // 冷却期内连轮询都不要跑：定时器每 30 分钟撞一次 -2041 只会把账号越推越深
+    const cd = this.riskCooldownMin();
+    if (cd > 0) {
+      if (manual) new Notice(`风控冷却中：还需 ${cd} 分钟，这期间抓取一定失败`, 8000);
       return;
     }
     const cookie = normalizeCookie(this.settings.cookie || '');
@@ -2067,11 +2459,24 @@ export default class WereadMpCatcher extends Plugin {
       }
 
       this.state.lastRun = { at: Date.now(), found, written, skipped, error: riskHit ? '风控熔断' : undefined };
+      if (!riskHit) this.noteRiskCleared(); // 整轮没撞风控 = 账号状态正常，冷却计数清零
       await this.saveAll();
       if (manual) {
         new Notice(`抓取完成：发现 ${found} 篇新文，落盘 ${written} 篇${skipped ? `，跳过 ${skipped}` : ''}`);
       }
     } catch (e) {
+      if (e instanceof RiskError) {
+        this.markRisk(e.code);
+        this.riskNotice(e);
+        // -2041 时定时器每 30 分钟继续撞墙只会把账号越推越深：直接停掉自动更新
+        if ((e.code === -2041 || e.code === -2012 || e.code === -2010) && this.timer !== null) {
+          this.stopWatch(false);
+          this.pushLog(`因风控（${e.code}）自动暂停自动更新`, 'warn');
+        }
+      } else if (e instanceof BudgetError) {
+        this.pushLog(`今日预算用完：${e.message}`, 'warn');
+        new Notice(e.message, 12000);
+      }
       const msg = e instanceof Error ? e.message : String(e);
       this.state.lastRun = { at: Date.now(), found, written, skipped, error: msg };
       this.watch.lastError = msg.slice(0, 60);
@@ -2634,12 +3039,49 @@ class WMSettingTab extends PluginSettingTab {
     this.update();
   }
 
+  /**
+   * 设置页最上面那句人话结论。小白只看这一条就该知道「现在能不能抓、下一步点哪」。
+   * 原则：不解释 -20xx 是什么，只给动作。
+   */
+  private renderHealthBanner(el: HTMLElement): void {
+    const p = this.plugin;
+    const cd = p.riskCooldownMin();
+    const code = p.settings.riskBlock?.code ?? '';
+    const q = p.settings.quota;
+    const lim = p.quotaLimits();
+    const listLeft = lim.list - (q?.list ?? 0);
+
+    let cls = 'is-unknown';
+    let text = '';
+    if (p.loginState() === 'none') {
+      text = '还没登录：点下面「扫码登录」，用微信扫一下就完成，不用复制任何 Cookie。';
+    } else if (cd > 0 && code === -2041) {
+      cls = 'is-bad';
+      text =
+        `微信读书暂时限制了「公众号列表」（-2041）—— 这不是登录问题，重扫码也没用。` +
+        `用手机微信读书 App 打开任一公众号文章（有滑动验证就划一下），回来点「立即解除」再试；不点也行，${cd} 分钟后自动解除。`;
+    } else if (cd > 0) {
+      cls = 'is-warn';
+      text = `登录态需要重扫（${code}）：点「扫码登录」。冷却 ${cd} 分钟后自动放开，这期间点刷新不会成功。`;
+    } else if (listLeft <= 0) {
+      cls = 'is-warn';
+      text = `今日抓取额度用完了（${q?.list ?? 0}/${lim.list}）—— 明天自动重置，已归档的笔记不受影响。`;
+    } else if (p.settings.webLoginOk === true) {
+      cls = 'is-ok';
+      text = `一切正常：登录有效、列表可用。${p.quotaSummary()}`;
+    } else {
+      text = `还没实测过：点「测试列表」跑一次就知道能不能抓。${p.quotaSummary()}`;
+    }
+    el.createDiv({ cls: `wmc-health ${cls}`, text });
+  }
+
   private renderBody(containerEl: HTMLElement): void {
     // 让插件在任何状态变更后都能立刻重绘设置页（登出后别再挂着旧昵称/头像）
     this.plugin.settingsRefresh = () => this.refreshUI();
 
     /* 1. 登录 */
     containerEl.createDiv({ cls: 'wmc-settings-h', text: '登录' });
+    this.renderHealthBanner(containerEl); // 大白话：现在能不能抓，不能的话下一步做什么
     const st = this.plugin.loginState();
     const card = containerEl.createDiv('wmc-login');
     const prof = this.plugin.settings.loginProfile;
@@ -2682,6 +3124,28 @@ class WMSettingTab extends PluginSettingTab {
         text: `网页登录态：${this.plugin.webLoginSummary()}`,
       });
     }
+    // 上一次「退出登录」的实证结果：清到什么程度、服务端认不认，直接摆出来
+    const lw = this.plugin.settings.lastWipe;
+    if (lw) {
+      const mins = Math.max(0, Math.round((Date.now() - lw.at) / 60000));
+      txt.createDiv({
+        cls: `wmc-login-web ${lw.leftSession === 0 && lw.leftDisk.length === 0 ? 'is-ok' : 'is-bad'}`,
+        text: `上次退出（${mins} 分钟前）：${lw.msg}`,
+      });
+    }
+    // 风控冷却：这是「登录明明成功了却加载不出列表」的唯一原因，必须显眼 + 可手动解除
+    const cdMin = this.plugin.riskCooldownMin();
+    if (cdMin > 0) {
+      const row = txt.createDiv({
+        cls: 'wmc-login-web is-bad',
+        text: `⏸ 风控冷却 ${cdMin} 分钟（${this.plugin.settings.riskBlock?.code ?? ''}）：这期间点刷新一定失败，重扫码也不会好。`,
+      });
+      const un = row.createEl('button', { cls: 'wmc-login-link', text: '手机 App 验证过了，立即解除' });
+      un.addEventListener('click', () => {
+        this.plugin.clearRiskBlock();
+        this.refreshUI();
+      });
+    }
 
     // 从没测过网页登录态时，打开设置页自动测一次：绿点/红点必须来自实测，不能停在「未检测」
     if (st !== 'none' && this.plugin.settings.webLoginOk === undefined && !this.autoProbed) {
@@ -2703,16 +3167,17 @@ class WMSettingTab extends PluginSettingTab {
         onClick: () => this.plugin.startQrLogin(),
       },
     ];
-    if (st !== 'none') {
-      loginBtns.push({
-        text: '退出登录',
-        onClick: async () => {
-          // 彻底清态：cookie / 官方 Key / 头像 / 书架缓存 / 网页登录态，清完可干净重扫
-          await this.plugin.logoutAccount();
-          this.refreshUI();
-        },
-      });
-    }
+    // 常驻：即使插件侧凭据已空，浏览器会话里也可能还留着旧账号登录态 ——
+    // 那正是「点扫码登录却直接显示已登录、看不到二维码」的来源
+    loginBtns.push({
+      text: '退出登录',
+      onClick: async () => {
+        // 彻底清态：cookie / 官方 Key / 头像 / 书架缓存 / 网页登录态，
+        // 外加 Obsidian 浏览器会话里的 weread cookie（清不干净会当场提示）
+        await this.plugin.logoutAccount();
+        this.refreshUI();
+      },
+    });
     loginBtns.push(
       {
         text: '同步书架',

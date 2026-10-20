@@ -3565,3 +3565,22 @@
 .wmc-settings-host .setting-item-control {
   display: none;
 }
+
+/* ---------------------------------------------------------------- *
+ * 设置页顶部「人话状态条」（v4.5.0）
+ * 只回答一件事：现在能不能抓、不能的话下一步做什么。
+ * ---------------------------------------------------------------- */
+.wmc-health {
+  margin: 6px 0 14px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border-left: 3px solid var(--interactive-accent);
+  background: var(--background-secondary);
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--text-normal);
+}
+.wmc-health.is-ok { border-left-color: var(--text-success, #2e9f5b); }
+.wmc-health.is-warn { border-left-color: var(--text-warning, #d99a2b); }
+.wmc-health.is-bad { border-left-color: var(--text-error, #d9534f); }
+.wmc-health.is-unknown { border-left-color: var(--text-faint); }

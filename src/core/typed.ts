@@ -39,15 +39,24 @@ export interface CookieItem {
   name: string;
   value: string;
   domain?: string;
+  path?: string;
+  secure?: boolean;
+  /** 该 cookie 对应的完整 URL（Electron 的 remove 需要 url 精确匹配 path/secure） */
+  url?: string;
 }
 
 export interface SessionLike {
   cookies?: {
+    /** 空对象 = 取该 session 全部 cookie（用于按 domain 全量筛 weread） */
     get?: (filter: { domain?: string; url?: string }) => Promise<CookieItem[] | undefined>;
     /** 必须显式删：clearStorageData 用 origin 过滤**删不掉** domain=.weread.qq.com 这类域 cookie */
     remove?: (url: string, name: string) => Promise<void>;
+    /** 把内存里的删除落盘（否则磁盘 Cookies 库里旧行会被下一次读取捞回来） */
+    flushStore?: () => Promise<void>;
   };
   clearStorageData?: (opts: Record<string, unknown>) => Promise<void>;
+  /** 用该 session 的登录态直接发请求：登出后用它做「服务端不认这个会话」的硬验证 */
+  fetch?: (url: string, opts?: Record<string, unknown>) => Promise<{ status: number; text(): Promise<string> }>;
 }
 
 /** Electron 主进程里创建的窗口（remote.BrowserWindow） */
