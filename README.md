@@ -256,6 +256,32 @@ curl -s "https://weread.qq.com/web/mp/articles?bookId=MP_WXS_xxxx&offset=0" \
 | 明明文件已经有了，每批还要重新下载一遍，名额被吃满，永远剩十几篇待抓 | 判「已存在」时没有补登归档索引；下一批又把它当待抓，先下载正文再判重复 | 判重在**发请求之前**完成，命中即补登索引，零网络开销 |
 | 跑完显示 `48 / 48 · 100%`，可只有 30 篇有笔记 | 收尾时拿「全号篇数」当进度总数 | 只显示本批处理量，全号库存单独一行 |
 
+## 接本地智能体（Hermes / Claude Code / CodeBuddy / WorkBuddy…）
+
+设置页 → **本地 Agent** 里选一个本机 CLI，插件就把「文章标题 + 正文 + 你的任务」拼成提示词，用子进程调用它，输出实时回显。默认关闭，只在点击时启动。
+
+| 预设 | 命令 |
+|---|---|
+| Hermes（默认） | `hermes -z "<prompt>"` |
+| Claude Code | `claude -p "<prompt>" --output-format text` |
+| Codex CLI | `codex exec "<prompt>"` |
+| Gemini CLI | `gemini -p "<prompt>"` |
+| CodeBuddy / WorkBuddy 内核 | `codebuddy -p "<prompt>" --output-format text` |
+| 自定义命令 | 自己填，`{prompt}` 是占位符 |
+
+### 关于 WorkBuddy.app：它没有可编程入口
+
+实测过，三条路都不通，所以不要把 `WorkBuddy.app` 直接填进「自定义命令」：
+
+- `WorkBuddy.app/Contents/Resources/app.asar.unpacked/cli/bin/codebuddy` 需要 `../dist/codebuddy`，而 dist 打在 `app.asar` 里没解包 → 直接跑报 `MODULE_NOT_FOUND`；
+- 包里唯一的 `--headless` 是 Chrome 截图参数，不是 agent CLI；
+- 程序化入口只有 deep link（`workbuddy://automation/run?…`、`workbuddy://chat/…`），作用是打开已有会话或触发已配置的自动化，**拿不回输出**。
+
+要让它和这份归档库联动，走这两条：
+
+1. **让 WorkBuddy 读你的库（推荐）**：给它装 `~/.workbuddy/skills/weread-mp-vault/SKILL.md` 这个 skill 后，可以直接在 WorkBuddy 里说「统计一下我的公众号归档」「哪个号还差几篇」「本周收了哪些」，它会按本机路径读 `data.json` 与笔记文件。只读，不改库。
+2. **插件调同门 CLI**：选上表里的「CodeBuddy / WorkBuddy 内核」预设。首次要在终端跑一次 `codebuddy` 完成 `/login`——它读 `~/.codebuddy`，与 `WorkBuddy.app` 的 `~/.workbuddy` 是两套配置，不共享登录态。
+
 ## 网络与隐私
 
 插件只向你配置的服务发起请求。没有遥测、没有统计上报、没有远程下发代码。
@@ -285,6 +311,7 @@ curl -s "https://weread.qq.com/web/mp/articles?bookId=MP_WXS_xxxx&offset=0" \
 
 | 版本 | 变更 |
 |---|---|
+| 4.5.3 | 本地 Agent 新增「CodeBuddy / WorkBuddy 内核」预设（`codebuddy -p … --output-format text`）；README 新增「接本地智能体」一节，写清 WorkBuddy.app 为何不能直接当 CLI 调，以及两种可行联调方式 |
 | 4.5.2 | 归档全部历史能真正跑完：判「已存在」提前到发请求之前并补登索引（旧实现每批把已存在的篇目重下一遍，吃满单批名额，永远剩十几篇「待抓」）；收尾进度不再用全号篇数冒充（旧版 30 篇的批次显示 48/48 100%）；新增「继续下一批（还有 N 篇）」按钮与「连续跑」开关（每批间隔 10 分钟）；单批上限说明改为讲清它只限下载量、不标记任何文章 |
 | 4.5.1 | 单号历史可以一路下拉到最早一篇：offset 改为按服务端 20 槽位推进（旧实现按返回条数累加，会重复/漏）；「到底」只认返回 0 条（旧逻辑用「<20 条」判最后一页，孙可可keke 只加载 20 篇就封底）；到底文案显示 `共 N 篇 · 最早 YYYY-MM-DD`；新增翻页节流（单页 ≥2.5 秒、每分钟 ≤8 次），防止密集翻页被判 `-2012 登录超时`；分页逻辑抽到 `src/core/paging.ts` 并加 6 条回归测试 |
 | 4.5.0 | 加每日请求预算（列表/正文分开算）、风控冷却 + 指数退避、冷却期内不打接口；设置页顶部新增一句人话结论；默认节奏 30 分钟/8 篇 → 240 分钟/3 篇（一次性迁移）；README 新增「加载不出文章？先对号入座」 |

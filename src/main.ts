@@ -294,6 +294,13 @@ export const AGENT_PRESETS: AgentPreset[] = [
   { id: 'codex', label: 'Codex CLI', cmd: 'codex', args: ['exec', '{prompt}'], hint: 'codex exec "<prompt>"' },
   { id: 'kimi', label: 'Kimi CLI', cmd: 'kimi', args: ['-p', '{prompt}'], hint: 'kimi -p "<prompt>"' },
   { id: 'gemini', label: 'Gemini CLI', cmd: 'gemini', args: ['-p', '{prompt}'], hint: 'gemini -p "<prompt>"' },
+  {
+    id: 'codebuddy',
+    label: 'CodeBuddy / WorkBuddy 内核',
+    cmd: 'codebuddy',
+    args: ['-p', '{prompt}', '--output-format', 'text'],
+    hint: 'codebuddy -p "<prompt>" --output-format text（首次需在终端跑一次 codebuddy 完成 /login）',
+  },
   { id: 'cursor', label: 'Cursor Agent', cmd: 'cursor-agent', args: ['-p', '{prompt}'], hint: 'cursor-agent -p "<prompt>"' },
   { id: 'custom', label: '自定义命令', cmd: '', args: [], hint: '自己填命令，{prompt} 是占位符' },
 ];
