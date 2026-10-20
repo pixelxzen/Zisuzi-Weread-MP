@@ -5,6 +5,7 @@ import type WereadMpCatcher from '../main';
 import type { WatchStatus } from '../main';
 import { AGENT_PRESETS } from '../main';
 import { BackfillModal } from './backfill-modal';
+import { inferOffsetFromCache } from '../core/paging';
 
 export const VIEW_TYPE_WMC = 'wmc-library';
 
@@ -83,6 +84,8 @@ export class WmcView extends ItemView {
   private loadingMore = false;
   private accountExhausted = false;
   private scrollMemory = 0;
+  /** 翻页失败/额度用完时的底部提示（renderList 重建后仍要显示，所以存成字段） */
+  private loadMoreMsg = '';
   private sideQuery = '';
   private synced = new Set<string>();
   private listLoading = false;
@@ -352,7 +355,7 @@ export class WmcView extends ItemView {
       this.renderList();
       // 选中的号还没有任何文章 → 自动拉它的列表（避免空白）
       if (v && !this.allRows().some((r) => r.account === v)) {
-        void this.plugin.fetchAccountList(v);
+        void this.plugin.fetchAccountList(v).catch(() => 0);
       }
     });
     mkSelect('已归档状态', [['all', '全部状态'], ['archived', '已归档'], ['pending', '未归档']] as Array<[string, string]>, this.archFilter, (v) => {
@@ -717,11 +720,21 @@ export class WmcView extends ItemView {
       step();
     }
     void this.fillSummaries(rows);
-    // 底部：滚动加载提示
+    // 底部：滚动加载提示。只有服务端真的返回空页才算「到底」，并把篇数和最早日期
+    // 摆出来，用户一眼能确认「真的翻到最早那篇了」。
     if (this.account) {
-      scroller
-        .createDiv('wmc-loadmore')
-        .setText(this.accountExhausted ? '已经到底了' : '往下滚，自动加载更早的文章');
+      const foot = scroller.createDiv('wmc-loadmore');
+      const mine = rows.filter((r) => r.account === this.account);
+      if (this.accountExhausted) {
+        const oldest = mine.reduce((m, r) => (!m || r.time < m ? r.time : m), 0);
+        const d = oldest ? new Date(oldest * 1000) : null;
+        const ds = d ? `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}` : '';
+        foot.setText(`已经到底了 · 共 ${mine.length} 篇${ds ? ` · 最早 ${ds}` : ''}`);
+      } else if (this.loadMoreMsg) {
+        foot.setText(this.loadMoreMsg);
+      } else {
+        foot.setText('往下滚，自动加载更早的文章');
+      }
     }
     // 搜索框正在打字时，empty+重建会失焦 → 恢复焦点到末尾
     if (this.query) {
@@ -943,13 +956,19 @@ export class WmcView extends ItemView {
         this.scrollMemory = 0;
         // 已翻到底的号，滚到底不再请求
         this.accountExhausted = !!this.plugin.state.accountDone?.[name];
+        // 老库升级后 offset 被清空：用「已缓存的篇数」推断下一页起点（20 槽位），
+        // 否则第一次滚动会重复拉第一页，用户要滚两次才见到新文章。
+        if (name && !this.accountExhausted && this.plugin.state.accountOffsets?.[name] === undefined) {
+          const cached = this.allRows().filter((r) => r.account === name).length;
+          if (cached > 0) this.plugin.state.accountOffsets![name] = inferOffsetFromCache(cached);
+        }
         this.renderList(); // 先用本地缓存秒开，不等网络
         if (!name) return;
         const hasCache = this.allRows().some((r) => r.account === name);
         if (!hasCache) {
           this.listLoading = true;
           this.renderList(); // 先出骨架屏
-          void this.plugin.fetchAccountList(name).finally(() => {
+          void this.plugin.fetchAccountList(name).catch(() => 0).finally(() => {
             this.listLoading = false;
             this.renderList();
           });
@@ -1011,9 +1030,13 @@ export class WmcView extends ItemView {
     foot?.setText('加载更多…');
     try {
       const r = await this.plugin.loadMoreForAccount(this.account);
-      if (r.added === 0 && !r.hasMore) this.accountExhausted = true;
-    } catch {
-      foot?.setText('加载失败，往下滚再试');
+      // 只有「服务端返回空页」才封底：返回条数少（19/9 都常见）不代表到底
+      if (r.exhausted) this.accountExhausted = true;
+      this.loadMoreMsg = '';
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      this.loadMoreMsg = /额度|上限/.test(msg) ? msg : '加载失败，往下滚再试';
+      foot?.setText(this.loadMoreMsg);
     }
     this.loadingMore = false;
     if (this.mode === 'list') this.renderList();

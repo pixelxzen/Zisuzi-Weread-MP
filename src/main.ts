@@ -51,6 +51,7 @@ import {
   type WebviewElement,
 } from './core/typed';
 import { WereadAgentApi, fetchApiKey } from './core/weread-api';
+import { isExhausted, nextOffset } from './core/paging';
 import {
   LLM_DEFAULTS,
   PROVIDERS,
@@ -167,6 +168,12 @@ interface WMState {
   accountOffsets?: Record<string, number>;
   /** 该号列表已翻到底（存量固定，不必再翻） */
   accountDone?: Record<string, boolean>;
+  /**
+   * v4.5.1 一次性清理标记。旧逻辑用「返回条数 < 20」判到底，把大量号错误标成
+   * done=true（孙可可keke 只加载 20 篇就显示到底）；offset 也按条数累加错过位。
+   * 升级时清掉这两张表，让用户重新往下滚能一路翻到最早那篇。
+   */
+  v451?: boolean;
   llmQuota?: { day: string; count: number };
   lastRun?: { at: number; found: number; written: number; skipped: number; error?: string };
   watchSince?: number;
@@ -212,6 +219,25 @@ class BudgetError extends Error {
 
 /** 每账号每天的列表请求预算（社区实测安全线约「10 个号 × 每天 2 次」） */
 const LIST_QUOTA_PER_ACCOUNT = 20;
+
+/**
+ * 公众号列表接口的服务端页槽位。
+ *
+ * 实测（2026-10-20，孙可可keke MP_WXS_3878069141）：
+ *   offset=0  → 20 条
+ *   offset=20 → **19 条**（服务端过滤掉一条）
+ *   offset=40 → **9 条**
+ *   offset=60 → 0 条（到底）
+ *
+ * 由此定两条铁律，之前的两个 bug 都是违反它们造成的：
+ * 1. offset 必须按 20 固定步长推进，**不能按返回条数累加**（否则错位：offset=39 会
+ *    重复返回 2025-06-19 那条）。
+ * 2. 「到底」的唯一判据是**返回 0 条**，返回条数 < 20 不代表到底（否则前 20 篇就
+ *    显示「已经到底了」，用户永远拉不到 2019 年那篇）。
+ *
+ * 这两条已抽成 src/core/paging.ts 并有单测（tests/paging.test.mjs）：
+ * 动手改分页前先跑 `npm test`，别再把「<20 就当最后一页」写回来。
+ */
 /** 每账号每天的正文抓取预算 */
 const CONTENT_QUOTA_PER_ACCOUNT = 20;
 
@@ -672,6 +698,15 @@ export default class WereadMpCatcher extends Plugin {
       this.settings.migrations = 450;
       void this.saveAll();
     }
+    // v4.5.1 一次性清理：旧「到底」判定用「返回条数 < 20」，把大量号错标成 done
+    // （表现为只加载 20 篇就显示「已经到底了」）；旧 offset 也按条数累加错过位。
+    // 清掉这两张表，用户重新往下滚就能一路翻到该号最早那篇。
+    if (!this.state.v451) {
+      this.state.accountDone = {};
+      this.state.accountOffsets = {};
+      this.state.v451 = true;
+      void this.saveAll();
+    }
   }
 
   async saveAll() {
@@ -963,9 +998,17 @@ export default class WereadMpCatcher extends Plugin {
       return 0;
     }
     const client = new WereadClient(this.http, cookie);
+    // 翻页节流：单页 ≥2.5 秒、每分钟 ≤8 次，防止滚动手势或自动增量连发把会话打成 -2012
+    await this.pageGate();
     if (!this.state.discovered) this.state.discovered = {};
     if (!this.state.accountOffsets) this.state.accountOffsets = {};
-    const offset = reset ? 0 : this.state.accountOffsets[acc.name] || 0;
+    if (!this.state.accountDone) this.state.accountDone = {};
+    if (reset) {
+      // 重新从第一页开始：offset 归零，「到底」标记复位（否则重进这个号还停在到底状态）
+      this.state.accountOffsets[acc.name] = 0;
+      this.state.accountDone[acc.name] = false;
+    }
+    const offset = this.state.accountOffsets[acc.name] || 0;
     try {
       const items = await client.listArticles(acc.bookId, offset);
       let added = 0;
@@ -982,10 +1025,14 @@ export default class WereadMpCatcher extends Plugin {
           added++;
         }
       }
-      this.state.accountOffsets[acc.name] = offset + items.length;
-      if (items.length < 20) {
-        if (!this.state.accountDone) this.state.accountDone = {};
+      // ① offset 按服务端页槽位（20）推进，不按返回条数累加 —— 实测这个接口会因过滤
+      //    少返回（20/19/9 都见过），按 items.length 累加会错位、重复或漏文章。
+      this.state.accountOffsets[acc.name] = nextOffset(offset);
+      // ② 「到底」唯一判据：服务端返回 0 条。少于 20 条不等于到底
+      //    （孙可可keke offset=40 只回 9 条，offset=60 才是 0 条）。
+      if (isExhausted(items.length)) {
         this.state.accountDone[acc.name] = true;
+        delete this.state.accountOffsets[acc.name];
       }
       if (added || reset) await this.saveAll();
       this.noteRiskCleared(); // 能拉到列表 = 账号没被限，把「连续撞墙次数」清零
@@ -999,6 +1046,8 @@ export default class WereadMpCatcher extends Plugin {
         this.riskNotice(e, name);
       } else if (e instanceof BudgetError) {
         new Notice(msg, 12000);
+        // 抛给视图：底部要显示「今日翻页额度用完」，不能装成「已经到底了」
+        throw e;
       } else {
         new Notice(`加载「${name}」失败：${msg}`, 7000);
       }
@@ -1020,6 +1069,8 @@ export default class WereadMpCatcher extends Plugin {
     const cookie = normalizeCookie(this.settings.cookie || '');
     if (!this.hasLogin()) return 0;
     const client = new WereadClient(this.http, cookie);
+    // 翻页节流：单页 ≥2.5 秒、每分钟 ≤8 次，防止滚动手势或自动增量连发把会话打成 -2012
+    await this.pageGate();
     if (!this.state.discovered) this.state.discovered = {};
     let added = 0;
     let offset = 0;
@@ -1053,7 +1104,7 @@ export default class WereadMpCatcher extends Plugin {
       }
       added += fresh;
       if (fresh === 0) break; // 整页都认识 → 没有更新的了
-      offset += items.length;
+      offset = nextOffset(offset); // 与列表接口的页槽位一致，别按返回条数累加
       await sleep(this.settings.delayListMs || 1200);
     }
     if (added) {
@@ -1063,11 +1114,12 @@ export default class WereadMpCatcher extends Plugin {
     return added;
   }
 
-  async loadMoreForAccount(name: string): Promise<{ added: number; hasMore: boolean }> {
+  async loadMoreForAccount(name: string): Promise<{ added: number; got: number; exhausted: boolean }> {
     const before = Object.keys(this.state.discovered || {}).length;
     const got = await this.fetchAccountList(name, false);
     const after = Object.keys(this.state.discovered || {}).length;
-    return { added: after - before, hasMore: got >= 20 };
+    // exhausted 只认服务端返回空 —— 视图据此显示「已经到底了」，别再用 got < 20 猜
+    return { added: after - before, got, exhausted: !!this.state.accountDone?.[name] };
   }
 
   /** 登出：清本地登录态 + 清 Electron session 里 weread 域 cookie（不清的话重扫码还是旧账号） */
@@ -1767,6 +1819,35 @@ export default class WereadMpCatcher extends Plugin {
     }
   }
 
+  /* ------------------------------ 翻页节流 ------------------------------- */
+
+  /** 上一次列表请求时间 + 最近一分钟的请求时刻（滑动窗口） */
+  private lastPageAt = 0;
+  private listHits: number[] = [];
+
+  /**
+   * 翻页节流。滚到底是一页接一页，手一抖就连发；实测（2026-10-20）1 分钟内 10 次
+   * 列表请求就会被判 `-2012 登录超时` —— 表现是「所有号都加载不出来」，用户会以为
+   * 登录坏了又去扫码，越弄越乱。
+   *
+   * 两道限制：单页最小间隔 2.5 秒；每分钟最多 8 次，超了自动等滑动窗口过去。
+   * 正常翻一个几百篇的号会被平滑降速，而不是把会话打死。
+   */
+  private async pageGate(): Promise<void> {
+    const now = Date.now();
+    this.listHits = this.listHits.filter((t) => now - t < 60000);
+    if (this.listHits.length >= 8) {
+      const wait = 60000 - (now - this.listHits[0]) + 500;
+      new Notice(`翻页太快：等 ${Math.ceil(wait / 1000)} 秒再继续（请求太密会被判登录超时）`, 6000);
+      await sleep(wait);
+      this.listHits = [];
+    }
+    const gap = this.lastPageAt + 2500 - Date.now();
+    if (gap > 0) await sleep(gap);
+    this.lastPageAt = Date.now();
+    this.listHits.push(this.lastPageAt);
+  }
+
   /* -------------------------------- 请求预算 ------------------------------- */
 
   /** 今日用量（跨自然日自动归零） */
@@ -2355,6 +2436,8 @@ export default class WereadMpCatcher extends Plugin {
     this.pushLog(`开始更新 · 检查 ${accounts.length} 个公众号`);
     this.emitWatch();
     const client = new WereadClient(this.http, cookie);
+    // 翻页节流：单页 ≥2.5 秒、每分钟 ≤8 次，防止滚动手势或自动增量连发把会话打成 -2012
+    await this.pageGate();
     let found = 0;
     let written = 0;
     let skipped = 0;
