@@ -1,0 +1,20 @@
+{
+  "obsidianDir": "~/Documents/Obsidian/剪藏笔记",
+  "accounts": [
+    { "name": "机器之心", "bookId": "MP_WXS_3073282833" },
+    { "name": "量子位", "bookId": "MP_WXS_3236757533" }
+  ],
+  "perAccount": 20,
+  "delayListMs": 1200,
+  "delayContentMs": 2500,
+  "batchRestEvery": 15,
+  "batchRestMs": 60000,
+  "maxNewPerRun": 6,
+  "maxPerAccountPerRun": 2,
+  "stateFile": "~/.weread-monitor/state.json",
+  "chrome": {
+    "profileDir": "~/.weread-monitor/chrome-profile",
+    "headless": true,
+    "closeWhenOwned": true
+  }
+}

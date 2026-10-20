@@ -9,7 +9,7 @@ const OUT = '微信读书公众号';
 test('SKILL.md frontmatter 合法且带版本', () => {
   const md = sp.renderSkillMd(VAULT, OUT);
   assert.match(md, /^---\nname: weread-mp-vault\n/);
-  assert.match(md, /version: "1\.1\.0"/);
+  assert.match(md, /version: "1\.2\.0"/);
   assert.match(md, /description: .*只读/);
 });
 
@@ -22,7 +22,8 @@ test('路径按 vault + outputDir 注入（不留占位符）', () => {
 
 test('四个任务脚本都在，且用注入的真实路径', () => {
   const md = sp.renderSkillMd(VAULT, OUT);
-  assert.ok(md.includes('## 任务一：每个号收了多少篇'));
+  assert.ok(md.includes('## 任务 A：快速统计'));
+  assert.ok(md.includes('## 任务 B：完整统计'));
   assert.ok(md.includes('## 任务二：找缺口'));
   assert.ok(md.includes('## 任务三：时间窗汇总'));
   assert.ok(md.includes('## 任务四：全文检索'));

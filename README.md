@@ -93,6 +93,21 @@ flowchart LR
 - **中间**：卡片 / 瀑布流 / 列表 / 标题四种视图，文章卡片带归档状态
 - **底部**：上次抓取结果、进度、下一轮倒计时，自动盯采状态一目了然
 
+## 一句话安装（推荐）
+
+把下面这句话丢给任意智能体（Hermes / WorkBuddy / Claude Code / Codex / Cursor），它会自己把插件和两个技能包装好：
+
+> 帮我装 Zisuzi-Weread-MP（Obsidian 插件 + 技能包），我的库在 `<你的库路径>`：
+> `curl -fsSL https://cdn.jsdelivr.net/gh/pixelxzen/Zisuzi-Weread-MP@main/install.sh | bash -s -- --vault "<你的库路径>"`
+
+或者在终端直接跑（会自动探测你的 Obsidian 库）：
+
+```bash
+curl -fsSL https://cdn.jsdelivr.net/gh/pixelxzen/Zisuzi-Weread-MP@main/install.sh | bash
+```
+
+装什么、参数、卸载、隐私说明 → **[INSTALL.md](INSTALL.md)**。下面是手动安装方式，仍然有效。
+
 ## 三分钟上手
 
 **1. 安装**
@@ -339,6 +354,7 @@ curl -s "https://weread.qq.com/web/mp/articles?bookId=MP_WXS_xxxx&offset=0" \
 
 | 版本 | 变更 |
 |---|---|
+| 4.6.1 | 「一句话安装」上线：`install.sh` 自动探测 Obsidian 库、装插件三件套（版本与体积双校验）、把 `weread-mp-vault`（读归档）与 `weread-mp-monitor`（扫码登录/定时盯采/全量历史）装到 6 家 agent 目录；多镜像回退（jsDelivr → GitHub raw → ghproxy）、`--dry-run` / `--plugin-only` / `--skills-only` / `--vault` / `--tag`；技能包加入快速模式（≈0.1s 只数篇数）与完整模式（字数/配图/占用），并改为零正则实现避免转义问题；抓取 skill 全量脱敏（用户名、库路径、cookie、Key 全部走 `$HOME` / config / 环境变量） |
 | 4.6.0 | 新增「技能包」安装器：一键把 `weread-mp-vault` 这份 SKILL.md 装到 Hermes / WorkBuddy / Claude Code / Codex / Gemini / Cursor 的 skills 目录（路径按当前 vault 自动填充），并在库里留一份源供任意 agent 一句话自装；可单独装到 WorkBuddy、可全部卸载（只删自己的目录）；技能内容含四个可跑任务：每号篇数、未归档缺口、时间窗汇总、全文检索 |
 | 4.5.3 | 本地 Agent 新增「CodeBuddy / WorkBuddy 内核」预设（`codebuddy -p … --output-format text`）；README 新增「接本地智能体」一节，写清 WorkBuddy.app 为何不能直接当 CLI 调，以及两种可行联调方式 |
 | 4.5.2 | 归档全部历史能真正跑完：判「已存在」提前到发请求之前并补登索引（旧实现每批把已存在的篇目重下一遍，吃满单批名额，永远剩十几篇「待抓」）；收尾进度不再用全号篇数冒充（旧版 30 篇的批次显示 48/48 100%）；新增「继续下一批（还有 N 篇）」按钮与「连续跑」开关（每批间隔 10 分钟）；单批上限说明改为讲清它只限下载量、不标记任何文章 |

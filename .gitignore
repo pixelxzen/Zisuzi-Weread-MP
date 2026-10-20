@@ -14,3 +14,7 @@ skills-lock.json
 
 # 宣传片构建产物（依赖 /tmp 中间文件，不进仓库）
 docs/promo-video-v5/
+
+# Python 字节码与缓存
+__pycache__/
+*.pyc

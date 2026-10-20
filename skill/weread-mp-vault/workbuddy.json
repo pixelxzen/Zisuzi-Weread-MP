@@ -1,0 +1,6 @@
+{
+  "display_name": "微信读书公众号归档库",
+  "display_name_en": "WeRead MP Vault",
+  "description_zh": "查本机 Obsidian 里的公众号归档：每号篇数、未归档缺口、本周新增、全文检索。只读。",
+  "description_en": "Query the local Obsidian WeRead Official-Account archive: counts, gaps, weekly digest, full-text search. Read-only."
+}
