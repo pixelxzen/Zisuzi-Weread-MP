@@ -133,20 +133,52 @@ Three layers, none of which replaces another:
 | Web session (`wr_vid` / `wr_skey` / `wr_rt` / `wr_gid`) | Article lists, bodies, images, audio and video | Turns red — re-scan |
 | The account itself | Whether the server is rate-limiting it | Turns amber — re-scanning does nothing |
 
+## Nothing loads? Match your symptom first
+
+Check the single plain-language line at the top of the settings tab — it already names the cause. The short version:
+
+| What you see | Real cause | Do this | Never do this |
+|---|---|---|---|
+| `-2041` (amber) "MP endpoint restricted" | This **account** is restricted on the article-list endpoint only. Login, shelf and book info are fine | Open any article of that Official Account in the WeRead mobile app (complete the slider if shown), then click "verified in app, clear cooldown" | ❌ **Do not scan the QR code again** — it changes the session, not the permission, and only adds another hit |
+| `-2012` / `-2010` (red) "session expired" | The session really expired (or was invalidated by repeated `-2041` hits) | Settings → Sign out → Scan to sign in | ❌ Do not spam refresh during cooldown |
+| "Daily quota reached" | The plugin applied its own brake; the account is fine | Try tomorrow; archived notes are untouched | ❌ Do not raise the quota/interval just to keep going |
+| One account empty, others fine | WeRead does not index that account | Open one of its articles in the app, then "Sync shelf" | — |
+
+Verify it yourself in 30 seconds (two requests, same cookie):
+
+```bash
+# ① Session: returns {"userVid":…,"name":"<your name>",…} when valid
+curl -s "https://weread.qq.com/web/user?userVid=<your vid>" \
+  -H "Cookie: <cookie from the settings tab>" -H "Referer: https://weread.qq.com/"
+
+# ② Article list: this is where -2041 comes from
+curl -s "https://weread.qq.com/web/mp/articles?bookId=MP_WXS_xxxx&offset=0" \
+  -H "Cookie: <same cookie>" -H "Referer: https://weread.qq.com/web/mp/MP_WXS_xxxx"
+```
+
+① has a name and ② returns `-2041` → the login is healthy, the account is throttled. ① also fails → the session is really gone.
+
+**Why it happens:** the list endpoint is a private API with no published quota. Community experience puts the safe line at roughly **10 accounts × 2 refreshes per day (≈20 list requests/day)** per WeRead account. Exceed it and you get a slider challenge; keep exceeding it and you land in a ~24-hour penalty box. 4.5.0 encodes that as hard limits.
+
 ## Fetch cadence: why it is not "fast"
 
-The Official Account endpoints are WeRead's private APIs. Hammering them triggers rate controls. The defaults below were validated on real accounts:
-
-| Parameter | Default | Notes |
+| Parameter | Default | Why this number |
 |---|---|---|
-| Poll interval | 30 min | Floor is 15 min; accounts publish hourly at best |
-| Articles per run | 6 | Larger batches hit rate controls |
+| Poll interval | **240 min** | 3 accounts × 6 runs/day ≈ 18 list requests, inside the safe line |
+| Articles per run | **3** | Article requests are counted separately; they get throttled too |
 | Per-account per-run | 2 | Spreads requests across accounts |
 | List delay | 1.2 s | Between consecutive list requests |
 | Content delay | 2.5 s | Between consecutive article requests |
 
-On rate-control codes (`-2010` / `-2012` / `-2041`) the plugin **stops immediately and does not retry**.
+More accounts → longer interval: 4–6 accounts ≈ 360 min, 7–10 ≈ 480 min, beyond that split accounts or use manual runs only.
 
+### Three brakes added in 4.5.0
+
+1. **Daily budget** — list and content requests each get `accounts × 20` per day; exceeding it raises a clear budget notice, not a fake "session expired".
+2. **Cooldown with exponential backoff** — 60 min on the first `-2041`, then 120 / 240 / 480 min; one successful list call resets it.
+3. **No requests during cooldown** — refresh, auto-watch and the settings-tab probe are all short-circuited, so "retry every hour" cannot become "hit them every hour".
+
+> On `-2010` / `-2012` / `-2041` the plugin **stops immediately, does not retry**, and pauses auto-watch by itself.
 > Do not lower these values for speed. The cost is your WeRead account being throttled, not the plugin crashing.
 
 ## Network and privacy
