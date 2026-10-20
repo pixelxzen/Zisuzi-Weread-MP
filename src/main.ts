@@ -2581,7 +2581,33 @@ export default class WereadMpCatcher extends Plugin {
     }
   }
 
+  /** 笔记的落盘路径：归档索引、幂等判定、任务列表三处必须用同一个算法 */
+  private notePathOf(accountName: string, title: string): string {
+    const base = safeFileName(title || '(无标题)');
+    const dir = normalizePath(`${this.settings.outputDir}/${safeFileName(accountName)}`);
+    return normalizePath(`${dir}/${base}.md`);
+  }
+
   private async fetchOne(client: WereadClient, acc: AccountRef, item: ArticleItem): Promise<'written' | 'exists' | 'empty'> {
+    const base = safeFileName(item.title || '(无标题)');
+    const dir = normalizePath(`${this.settings.outputDir}/${safeFileName(acc.name)}`);
+    const path = this.notePathOf(acc.name, item.title);
+
+    // 幂等判定必须在**发任何网络请求之前**：文件已经在就直接补登索引返回。
+    // 旧实现先下载正文/图片、最后才判 path 存在 —— 于是「文件在但索引里没记录」的号
+    // 每批都要白下载一遍正文（48 篇的号一次白抓 28 篇），既慢又容易撞风控；
+    // 更糟的是判 exists 后不补登，下一批又把这些篇当「待抓」，永远吃满单批名额。
+    if (this.app.vault.getAbstractFileByPath(path)) {
+      this.state.processed[item.reviewId] = {
+        account: acc.name,
+        title: item.title,
+        time: item.time,
+        path,
+        at: Date.now(),
+      };
+      return 'exists';
+    }
+
     const html = await client.getContentHtml(item.reviewId);
     let { markdown } = htmlToMarkdown(html);
     const { images, media } = htmlToMarkdown(html);
@@ -2601,8 +2627,6 @@ export default class WereadMpCatcher extends Plugin {
       }
     }
 
-    const base = safeFileName(item.title || '(无标题)');
-    const dir = normalizePath(`${this.settings.outputDir}/${safeFileName(acc.name)}`);
     const assetDir = normalizePath(`${this.settings.outputDir}/assets/${base}`);
     await this.ensureFolder(dir);
 
@@ -2662,8 +2686,6 @@ export default class WereadMpCatcher extends Plugin {
 
     let bodyMd = replaceImagePlaceholders(markdown, localPaths);
     if (media.length) bodyMd = replaceMediaPlaceholders(bodyMd, mediaRefs);
-    const path = normalizePath(`${dir}/${base}.md`);
-    if (this.app.vault.getAbstractFileByPath(path)) return 'exists'; // 幂等：已存在算已完成，不算空
 
     const published = fmtDate(item.time);
     const fmTags = ['剪藏', '微信读书公众号'];
@@ -2835,9 +2857,23 @@ export default class WereadMpCatcher extends Plugin {
     const scope = only ? list.filter((a) => only.has(a.reviewId)) : list;
     const tasks: BfItem[] = scope.map((it) => {
       const rec = this.state.processed[it.reviewId];
-      // 光有 processed 记录不算数：笔记文件必须真的还在（用户可能删过/移动过）
-      const fileOk = !!(rec && rec.path && this.app.vault.getAbstractFileByPath(rec.path));
-      const done = fileOk && !only;
+      // 文件才是唯一事实来源：processed 记录可能被清过（例如退出登录会清索引），
+      // 也可能用户手动把笔记挪进来。按统一路径判存在，存在就顺手补登索引 ——
+      // 否则这些「文件在、索引无」的篇目会永远显示待抓，每批还白占单批名额。
+      const expected = this.notePathOf(acc.name, it.title);
+      const onDisk =
+        this.app.vault.getAbstractFileByPath(expected) ||
+        (rec?.path ? this.app.vault.getAbstractFileByPath(rec.path) : null);
+      if (onDisk) {
+        this.state.processed[it.reviewId] = {
+          account: acc.name,
+          title: it.title,
+          time: it.time,
+          path: rec?.path || expected,
+          at: rec?.at || Date.now(),
+        };
+      }
+      const done = !!onDisk && !only;
       return {
         reviewId: it.reviewId,
         title: it.title,

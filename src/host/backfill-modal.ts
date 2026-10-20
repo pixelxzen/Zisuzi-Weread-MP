@@ -37,6 +37,10 @@ export class BackfillModal extends Modal {
   private useCache = true;
   private signal = { stop: false };
   private running = false;
+  /** 窗口是否已关闭（自动连跑时要中止） */
+  private closed = false;
+  /** 本批跑完自动继续下一批（默认关） */
+  private autoContinue = false;
   /** 明细行缓存：reviewId → 行元素（增量更新，避免整表重建闪烁） */
   private rowEls = new Map<string, HTMLElement>();
   /** 上次渲染的状态签名，用于跳过未变化的行 */
@@ -142,7 +146,17 @@ export class BackfillModal extends Modal {
       const n = Number(bInput.value);
       if (Number.isFinite(n) && n > 0) this.maxItems = Math.min(500, Math.round(n));
     });
-    addHint(batchVal, '建议 ≤30 篇，跑完隔 10 分钟再下一批');
+    addHint(batchVal, '这一批最多「下载」多少篇。超过的部分不会被标记失败，只是留着仍是「待抓」，再点一次或点「继续下一批」就能接着跑');
+
+    const autoVal = row(f2, '连续跑');
+    const autoLine = autoVal.createDiv('wmc-bf-inline');
+    const autoCb = autoLine.createEl('input', { type: 'checkbox' });
+    autoCb.checked = this.autoContinue;
+    autoCb.addEventListener('change', () => {
+      this.autoContinue = autoCb.checked;
+    });
+    autoLine.createSpan({ cls: 'wmc-bf-unit', text: '本批跑完自动继续，每批间隔 10 分钟' });
+    addHint(autoVal, '几百篇的大号才需要；默认关，跑完会给你一个「继续下一批」按钮');
 
     const spdVal = row(f2, '速度');
     const seg = spdVal.createDiv('wmc-bf-seg');
@@ -273,22 +287,58 @@ export class BackfillModal extends Modal {
     if (this.stopBtn) this.stopBtn.disabled = true;
     this.items = res.items;
     this.renderStock();
+    const st = this.plugin.getArchiveStats(this.picked);
+    const remain = st.remaining;
+    // 收尾进度只反映「本批实际处理了多少」。旧代码拿 items.length（全号篇数）
+    // 当 total，于是 30 篇的批次会显示成「48/48 · 100%」——用户以为全跑完了，
+    // 剩下的篇目却还是「待抓」。这是最容易误解的一处。
+    const handled = res.written + res.skipped + res.failed;
     this.renderProgress({
       phase: 'fetch',
-      done: res.items.length,
-      total: res.items.length,
+      done: handled,
+      total: Math.max(1, handled),
       written: res.written,
       items: res.items,
+      totalAll: st.total,
+      archivedAll: st.archived,
     });
     this.appendFootNote(
       res.error
         ? `⛔ ${res.error}`
-        : `完成 · 归档 ${res.written} · 已存在 ${res.skipped} · 失败 ${res.failed}${
+        : `本批完成 · 新归档 ${res.written} · 已存在 ${res.skipped} · 失败 ${res.failed}${
             res.stopped ? '（手动停止）' : ''
-          }${res.written >= this.maxItems ? '　已达单批上限，隔 10 分钟再跑' : ''}`,
+          }　｜　这个号共 ${st.total} 篇 · 已归档 ${st.archived} · 未归档 ${remain}`,
       !!res.error,
     );
     if (res.error) new Notice(res.error, 12000);
+
+    // 还有没归档的 → 给一个明确的「继续下一批」按钮（不用关窗重开，也不会漏）
+    if (remain > 0 && !res.error && !res.stopped) {
+      const foot = this.contentEl.querySelector<HTMLElement>('.wmc-bf-foot');
+      if (foot && !foot.querySelector('.wmc-bf-next')) {
+        const b = foot.createEl('button', {
+          cls: 'wmc-bf-btn is-primary wmc-bf-next',
+          text: `继续下一批（还有 ${remain} 篇）`,
+        });
+        b.addEventListener('click', () => {
+          b.remove();
+          void this.start();
+        });
+      }
+    }
+
+    // 自动连跑：大号（几百篇）一批跑不完时用，每批之间等 10 分钟
+    if (this.autoContinue && remain > 0 && !res.error && !res.stopped) {
+      new Notice(`本批完成，10 分钟后自动继续下一批（还剩 ${remain} 篇）`, 8000);
+      for (let i = 0; i < 600; i++) {
+        if (this.closed || !this.autoContinue) return;
+        await new Promise<void>((r) => window.setTimeout(r, 1000));
+      }
+      if (!this.closed && this.autoContinue) {
+        this.contentEl.querySelector<HTMLElement>('.wmc-bf-next')?.remove();
+        void this.start();
+      }
+    }
 
     if (res.failed > 0) {
       const foot = this.contentEl.querySelector<HTMLElement>('.wmc-bf-foot');
@@ -451,6 +501,8 @@ export class BackfillModal extends Modal {
   onClosed?: () => void;
 
   onClose(): void {
+    this.closed = true;
+    this.autoContinue = false;
     this.signal.stop = true;
     this.contentEl.empty();
     this.onClosed?.();
