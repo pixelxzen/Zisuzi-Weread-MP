@@ -8,7 +8,7 @@
 > 我的 Obsidian 库在 `<把你的库路径填这里>`。
 > 执行这条命令，把输出完整贴给我；有报错就告诉我哪一行失败：
 >
-> `curl -fsSL https://cdn.jsdelivr.net/gh/pixelxzen/Zisuzi-Weread-MP@main/install.sh | bash -s -- --vault "<你的库路径>"`
+> `curl -fsSL https://cdn.jsdelivr.net/gh/pixelxzen/Zisuzi-Weread-MP@master/install.sh | bash -s -- --vault "<你的库路径>"`
 
 智能体会执行并把结果报给你。装完你只需两步：重启 Obsidian → 启用插件 → 扫码登录。
 
@@ -18,15 +18,15 @@
 
 ```bash
 # 通道 A：jsDelivr（多数网络最快）
-curl -fsSL https://cdn.jsdelivr.net/gh/pixelxzen/Zisuzi-Weread-MP@main/install.sh | bash
+curl -fsSL https://cdn.jsdelivr.net/gh/pixelxzen/Zisuzi-Weread-MP@master/install.sh | bash
 
 # 通道 B：api.github.com（github.com / jsDelivr 被墙时用这条，实测最稳）
-curl -fsSL -H "Accept: application/vnd.github.raw" "https://api.github.com/repos/pixelxzen/Zisuzi-Weread-MP/contents/install.sh?ref=main" | bash
+curl -fsSL -H "Accept: application/vnd.github.raw" "https://api.github.com/repos/pixelxzen/Zisuzi-Weread-MP/contents/install.sh?ref=master" | bash
 
 有多个库时指定一个：
 
 ```bash
-curl -fsSL https://cdn.jsdelivr.net/gh/pixelxzen/Zisuzi-Weread-MP@main/install.sh \
+curl -fsSL https://cdn.jsdelivr.net/gh/pixelxzen/Zisuzi-Weread-MP@master/install.sh \
   | bash -s -- --vault "/Users/你的用户名/Documents/你的库"
 ```
 

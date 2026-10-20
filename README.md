@@ -98,16 +98,16 @@ flowchart LR
 把下面这句话丢给任意智能体（Hermes / WorkBuddy / Claude Code / Codex / Cursor），它会自己把插件和两个技能包装好：
 
 > 帮我装 Zisuzi-Weread-MP（Obsidian 插件 + 技能包），我的库在 `<你的库路径>`：
-> `curl -fsSL https://cdn.jsdelivr.net/gh/pixelxzen/Zisuzi-Weread-MP@main/install.sh | bash -s -- --vault "<你的库路径>"`
+> `curl -fsSL https://cdn.jsdelivr.net/gh/pixelxzen/Zisuzi-Weread-MP@master/install.sh | bash -s -- --vault "<你的库路径>"`
 
 或者在终端直接跑（会自动探测你的 Obsidian 库）：
 
 ```bash
 # 通道 A：jsDelivr
-curl -fsSL https://cdn.jsdelivr.net/gh/pixelxzen/Zisuzi-Weread-MP@main/install.sh | bash
+curl -fsSL https://cdn.jsdelivr.net/gh/pixelxzen/Zisuzi-Weread-MP@master/install.sh | bash
 
 # 通道 B：api.github.com（github.com / jsDelivr 被墙时用这条）
-curl -fsSL -H "Accept: application/vnd.github.raw" "https://api.github.com/repos/pixelxzen/Zisuzi-Weread-MP/contents/install.sh?ref=main" | bash
+curl -fsSL -H "Accept: application/vnd.github.raw" "https://api.github.com/repos/pixelxzen/Zisuzi-Weread-MP/contents/install.sh?ref=master" | bash
 
 装什么、参数、卸载、隐私说明 → **[INSTALL.md](INSTALL.md)**。下面是手动安装方式，仍然有效。
 

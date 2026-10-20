@@ -3,7 +3,7 @@
 # Zisuzi-Weread-MP 一键安装：Obsidian 插件 + 跨 agent 技能包
 #
 #   一句话安装（复制给任何智能体或终端）：
-#     curl -fsSL https://cdn.jsdelivr.net/gh/pixelxzen/Zisuzi-Weread-MP@main/install.sh | bash
+#     curl -fsSL https://cdn.jsdelivr.net/gh/pixelxzen/Zisuzi-Weread-MP@master/install.sh | bash
 #
 #   常用参数：
 #     --vault "/path/to/YourVault"   指定库（不传则自动探测 Obsidian 记录的库）
@@ -95,7 +95,7 @@ if [ -z "${TAG}" ]; then
         | python3 -c 'import json,sys
 try: print(json.load(sys.stdin).get("tag_name",""))
 except Exception: print("")' 2>/dev/null || true)
-  [ -z "${TAG}" ] && TAG="main" && c_warn "取不到最新 release 版本号，回退 main 分支"
+  [ -z "${TAG}" ] && TAG="master" && c_warn "取不到最新 release 版本号，回退 master 分支"
 fi
 
 c_info "库：${VAULT}"
