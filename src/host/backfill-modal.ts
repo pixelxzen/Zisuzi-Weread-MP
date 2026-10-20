@@ -307,7 +307,7 @@ export class BackfillModal extends Modal {
         ? `⛔ ${res.error}`
         : `本批完成 · 新归档 ${res.written} · 已存在 ${res.skipped} · 失败 ${res.failed}${
             res.stopped ? '（手动停止）' : ''
-          }　｜　这个号共 ${st.total} 篇 · 已归档 ${st.archived} · 未归档 ${remain}`,
+          } ｜ 这个号共 ${st.total} 篇 · 已归档 ${st.archived} · 未归档 ${remain}`,
       !!res.error,
     );
     if (res.error) new Notice(res.error, 12000);

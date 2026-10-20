@@ -2,9 +2,11 @@
   <img src="assets/hero.jpg" alt="Zisuzi-Weread-MP · 微信读书公众号盯采" width="100%" />
 </div>
 
-<h1 align="center">
+<h1 align="center">Zisuzi-Weread-MP</h1>
+
+<p align="center">
   <img src="assets/logo.svg" alt="Zisuzi-Weread-MP" width="420" />
-</h1>
+</p>
 
 <p align="center">
   <b>微信读书公众号盯采</b> · 一次扫码，把你书架里订阅的公众号文章，自动搬进 Obsidian。

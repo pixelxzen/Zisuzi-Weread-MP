@@ -3582,7 +3582,7 @@ class WMSettingTab extends PluginSettingTab {
       });
       const list = box.createDiv();
       for (const t of targets) {
-        list.createDiv({ cls: 'wmc-skill-row', text: `${t.installed ? '✔' : '✘'}  ${t.label}　${t.path}` });
+        list.createDiv({ cls: 'wmc-skill-row', text: `${t.installed ? '✔' : '✘'}  ${t.label} ${t.path}` });
       }
       const row = box.createDiv('wmc-bf-inline');
       const bAll = row.createEl('button', { cls: 'wmc-hero-btn is-primary', text: '一键安装到全部' });
@@ -3611,7 +3611,7 @@ class WMSettingTab extends PluginSettingTab {
       const src = this.plugin.skillSourcePath();
       if (src) {
         box.createDiv({
-          text: `库里也留了一份源：${src}　—— 想让某个 agent 自己装，就对它说「把这个目录复制到你的 skills 目录，然后读一下 SKILL.md」。`,
+          text: `库里也留了一份源：${src} —— 想让某个 agent 自己装，就对它说「把这个目录复制到你的 skills 目录，然后读一下 SKILL.md」。`,
         });
       }
     }

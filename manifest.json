@@ -1,7 +1,7 @@
 {
   "id": "zisuzi-weread-mp",
   "name": "Zisuzi-Weread-MP",
-  "version": "4.6.2",
+  "version": "4.6.3",
   "minAppVersion": "1.13.0",
   "description": "Archive WeChat Official Account articles from your WeRead shelf as local Markdown notes, with images and media saved locally.",
   "author": "紫苏子ACG",

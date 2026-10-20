@@ -44,8 +44,9 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          # 幂等：tag 重推或重跑时，先建/复用 draft，再强制覆盖资产（避免 HTTP 422 ReleaseAsset.name already exists）
           gh release create "${GITHUB_REF_NAME}" \
             --draft \
             --title "${GITHUB_REF_NAME}" \
-            --notes "Release ${GITHUB_REF_NAME}" \
-            main.js manifest.json styles.css
+            --notes "Release ${GITHUB_REF_NAME}" || true
+          gh release upload "${GITHUB_REF_NAME}" main.js manifest.json styles.css --clobber
