@@ -282,6 +282,34 @@ curl -s "https://weread.qq.com/web/mp/articles?bookId=MP_WXS_xxxx&offset=0" \
 1. **让 WorkBuddy 读你的库（推荐）**：给它装 `~/.workbuddy/skills/weread-mp-vault/SKILL.md` 这个 skill 后，可以直接在 WorkBuddy 里说「统计一下我的公众号归档」「哪个号还差几篇」「本周收了哪些」，它会按本机路径读 `data.json` 与笔记文件。只读，不改库。
 2. **插件调同门 CLI**：选上表里的「CodeBuddy / WorkBuddy 内核」预设。首次要在终端跑一次 `codebuddy` 完成 `/login`——它读 `~/.codebuddy`，与 `WorkBuddy.app` 的 `~/.workbuddy` 是两套配置，不共享登录态。
 
+### 技能包：让任意 agent 会读这个库
+
+设置页 → **技能包** 点「一键安装到全部」，插件会把一份 `SKILL.md` 写到本机各 agent 的 skills 目录：
+
+| Agent | 安装位置 |
+|---|---|
+| Hermes | `~/.hermes/skills/weread-mp-vault/` |
+| WorkBuddy | `~/.workbuddy/skills/weread-mp-vault/` |
+| Claude Code | `~/.claude/skills/weread-mp-vault/` |
+| Codex CLI | `~/.codex/skills/weread-mp-vault/` |
+| Gemini CLI | `~/.gemini/skills/weread-mp-vault/` |
+| Cursor | `~/.cursor/skills/weread-mp-vault/` |
+
+同一份内容，里面的库路径按你当前 vault **自动填充**，换库重装一次即可。装好后在任意一个 agent 里直接说：
+
+| 你说 | 它做 |
+|---|---|
+| 「统计我的公众号归档」 | 每个号收了多少篇、最近更新日期 |
+| 「哪个号还差几篇没归档」 | 读 `data.json` 和文件比对出缺口清单 |
+| 「本周收了哪些号的文章」 | 按 `published:` 做时间窗汇总 |
+| 「找一下讲 Codex 的那篇」 | 全文检索 `rg` |
+
+插件还会在库里留一份源：`<vault>/.agent-skills/weread-mp-vault/`。**让 agent 自己装**只要一句话：
+
+> 把这个目录复制到你的 skills 目录，然后读一下 SKILL.md：`<vault>/.agent-skills/weread-mp-vault`
+
+「全部卸载」只删本 skill 自己的目录，不碰别的技能。
+
 ## 网络与隐私
 
 插件只向你配置的服务发起请求。没有遥测、没有统计上报、没有远程下发代码。
@@ -311,6 +339,7 @@ curl -s "https://weread.qq.com/web/mp/articles?bookId=MP_WXS_xxxx&offset=0" \
 
 | 版本 | 变更 |
 |---|---|
+| 4.6.0 | 新增「技能包」安装器：一键把 `weread-mp-vault` 这份 SKILL.md 装到 Hermes / WorkBuddy / Claude Code / Codex / Gemini / Cursor 的 skills 目录（路径按当前 vault 自动填充），并在库里留一份源供任意 agent 一句话自装；可单独装到 WorkBuddy、可全部卸载（只删自己的目录）；技能内容含四个可跑任务：每号篇数、未归档缺口、时间窗汇总、全文检索 |
 | 4.5.3 | 本地 Agent 新增「CodeBuddy / WorkBuddy 内核」预设（`codebuddy -p … --output-format text`）；README 新增「接本地智能体」一节，写清 WorkBuddy.app 为何不能直接当 CLI 调，以及两种可行联调方式 |
 | 4.5.2 | 归档全部历史能真正跑完：判「已存在」提前到发请求之前并补登索引（旧实现每批把已存在的篇目重下一遍，吃满单批名额，永远剩十几篇「待抓」）；收尾进度不再用全号篇数冒充（旧版 30 篇的批次显示 48/48 100%）；新增「继续下一批（还有 N 篇）」按钮与「连续跑」开关（每批间隔 10 分钟）；单批上限说明改为讲清它只限下载量、不标记任何文章 |
 | 4.5.1 | 单号历史可以一路下拉到最早一篇：offset 改为按服务端 20 槽位推进（旧实现按返回条数累加，会重复/漏）；「到底」只认返回 0 条（旧逻辑用「<20 条」判最后一页，孙可可keke 只加载 20 篇就封底）；到底文案显示 `共 N 篇 · 最早 YYYY-MM-DD`；新增翻页节流（单页 ≥2.5 秒、每分钟 ≤8 次），防止密集翻页被判 `-2012 登录超时`；分页逻辑抽到 `src/core/paging.ts` 并加 6 条回归测试 |

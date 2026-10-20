@@ -52,6 +52,7 @@ import {
 } from './core/typed';
 import { WereadAgentApi, fetchApiKey } from './core/weread-api';
 import { isExhausted, nextOffset } from './core/paging';
+import { SKILL_NAME, SKILL_TARGETS, renderSkillMd, renderWorkbuddyMeta } from './core/skill-pack';
 import {
   LLM_DEFAULTS,
   PROVIDERS,
@@ -120,6 +121,8 @@ export interface WMSettings {
   quota?: { day: string; list: number; content: number };
   /** 一次性迁移标记（450 = v4.5.0 把旧的 30 分钟/8 篇改成安全值，只执行一次） */
   migrations?: number;
+  /** 最近一次安装技能包的时间（设置页展示用） */
+  skillInstalledAt?: number;
   /** 最近一次实测的网页登录态（列表/正文用），undefined = 没测过 */
   webLoginOk?: boolean;
   webLoginAt?: number;
@@ -1855,6 +1858,117 @@ export default class WereadMpCatcher extends Plugin {
     this.listHits.push(this.lastPageAt);
   }
 
+  /* ------------------------------ 跨 agent 技能包 ------------------------------ */
+
+  private fsApi(): {
+    existsSync?: (p: string) => boolean;
+    mkdirSync?: (p: string, o?: unknown) => void;
+    writeFileSync?: (p: string, d: string) => void;
+    rmSync?: (p: string, o?: unknown) => void;
+  } | null {
+    const req = nodeRequire();
+    if (!req) return null;
+    try {
+      return req('fs');
+    } catch {
+      return null;
+    }
+  }
+
+  /** 本机各 agent 的 skills 目录 + 是否已装 */
+  skillTargetStatus(): Array<{ id: string; label: string; path: string; installed: boolean }> {
+    const home = nodeOs()?.homedir?.() || '';
+    const fs = this.fsApi();
+    return SKILL_TARGETS.map((t) => {
+      const path = `${home}/${t.dir}/${SKILL_NAME}`;
+      return { id: t.id, label: t.label, path, installed: !!fs?.existsSync?.(`${path}/SKILL.md`) };
+    });
+  }
+
+  /** 库里留的 skill 源目录（任何 agent 都能自己复制过去） */
+  skillSourcePath(): string {
+    const base = vaultBasePath(this.app.vault.adapter) || '';
+    return base ? `${base}/.agent-skills/${SKILL_NAME}` : '';
+  }
+
+  private skillFiles(): { md: string; meta: string } | null {
+    const base = vaultBasePath(this.app.vault.adapter) || '';
+    if (!base) return null;
+    return {
+      md: renderSkillMd(base, this.settings.outputDir || DEFAULTS.outputDir),
+      meta: renderWorkbuddyMeta(),
+    };
+  }
+
+  /** 一键安装到本机所有 agent 的 skills 目录（同一份 SKILL.md，各家目录不同） */
+  async installSkillPack(): Promise<{ ok: string[]; fail: string[]; source: string }> {
+    const fs = this.fsApi();
+    const files = this.skillFiles();
+    if (!fs?.mkdirSync || !fs.writeFileSync || !files) {
+      return { ok: [], fail: ['当前环境无法写文件（或拿不到库路径）'], source: '' };
+    }
+    const ok: string[] = [];
+    const fail: string[] = [];
+    for (const t of this.skillTargetStatus()) {
+      try {
+        fs.mkdirSync(t.path, { recursive: true });
+        fs.writeFileSync(`${t.path}/SKILL.md`, files.md);
+        fs.writeFileSync(`${t.path}/workbuddy.json`, files.meta);
+        ok.push(t.label);
+      } catch (e) {
+        fail.push(`${t.label}：${e instanceof Error ? e.message : String(e)}`);
+      }
+    }
+    // 库里再留一份源：让任何 agent 都能「把 <vault>/.agent-skills/… 复制到你的 skills 目录」一句话自装
+    const source = this.skillSourcePath();
+    try {
+      if (source) {
+        fs.mkdirSync(source, { recursive: true });
+        fs.writeFileSync(`${source}/SKILL.md`, files.md);
+        fs.writeFileSync(`${source}/workbuddy.json`, files.meta);
+      }
+    } catch {
+      /* 库不可写就算了，不阻塞 agent 侧的安装 */
+    }
+    this.settings.skillInstalledAt = Date.now();
+    await this.saveAll();
+    return { ok, fail, source };
+  }
+
+  /** 只装到某一个 agent（id 见 SKILL_TARGETS） */
+  async installSkillTo(id: string): Promise<boolean> {
+    const fs = this.fsApi();
+    const files = this.skillFiles();
+    const t = this.skillTargetStatus().find((x) => x.id === id);
+    if (!fs?.mkdirSync || !fs.writeFileSync || !files || !t) return false;
+    try {
+      fs.mkdirSync(t.path, { recursive: true });
+      fs.writeFileSync(`${t.path}/SKILL.md`, files.md);
+      fs.writeFileSync(`${t.path}/workbuddy.json`, files.meta);
+      this.settings.skillInstalledAt = Date.now();
+      await this.saveAll();
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /** 卸载：只删本 skill 自己的目录，绝不碰别的 skill */
+  async uninstallSkillPack(): Promise<string[]> {
+    const fs = this.fsApi();
+    const done: string[] = [];
+    for (const t of this.skillTargetStatus()) {
+      if (!t.installed || !fs?.rmSync) continue;
+      try {
+        fs.rmSync(t.path, { recursive: true, force: true });
+        done.push(t.label);
+      } catch {
+        /* noop */
+      }
+    }
+    return done;
+  }
+
   /* -------------------------------- 请求预算 ------------------------------- */
 
   /** 今日用量（跨自然日自动归零） */
@@ -3458,6 +3572,49 @@ class WMSettingTab extends PluginSettingTab {
       },
       { wide: true },
     );
+
+    containerEl.createDiv({ cls: 'wmc-settings-h', text: '技能包（让 agent 会读这个库）' });
+    {
+      const targets = this.plugin.skillTargetStatus();
+      const box = containerEl.createDiv('wmc-health is-unknown');
+      box.createDiv({
+        text: '把「查这个公众号归档库」装成 SKILL.md：Hermes / WorkBuddy / Claude Code / Codex / Gemini / Cursor 通用，同一份内容装到各家目录。只读，不改库。',
+      });
+      const list = box.createDiv();
+      for (const t of targets) {
+        list.createDiv({ cls: 'wmc-skill-row', text: `${t.installed ? '✔' : '✘'}  ${t.label}　${t.path}` });
+      }
+      const row = box.createDiv('wmc-bf-inline');
+      const bAll = row.createEl('button', { cls: 'wmc-hero-btn is-primary', text: '一键安装到全部' });
+      bAll.addEventListener('click', async () => {
+        const r = await this.plugin.installSkillPack();
+        new Notice(
+          r.fail.length
+            ? `已装 ${r.ok.length} 个，失败 ${r.fail.length}：${r.fail.join('；')}`
+            : `已安装到 ${r.ok.join('、')}`,
+          r.fail.length ? 12000 : 8000,
+        );
+        this.refreshUI();
+      });
+      const bWb = row.createEl('button', { cls: 'wmc-hero-btn', text: '只装到 WorkBuddy' });
+      bWb.addEventListener('click', async () => {
+        const ok = await this.plugin.installSkillTo('workbuddy');
+        new Notice(ok ? '已装到 WorkBuddy：下次说「统计我的公众号归档」就能用' : '安装失败（检查 ~/.workbuddy/skills 是否可写）', 8000);
+        this.refreshUI();
+      });
+      const bUn = row.createEl('button', { cls: 'wmc-login-link', text: '全部卸载' });
+      bUn.addEventListener('click', async () => {
+        const done = await this.plugin.uninstallSkillPack();
+        new Notice(done.length ? `已卸载：${done.join('、')}` : '没有已安装的技能包', 7000);
+        this.refreshUI();
+      });
+      const src = this.plugin.skillSourcePath();
+      if (src) {
+        box.createDiv({
+          text: `库里也留了一份源：${src}　—— 想让某个 agent 自己装，就对它说「把这个目录复制到你的 skills 目录，然后读一下 SKILL.md」。`,
+        });
+      }
+    }
 
     containerEl.createDiv({ cls: 'wmc-settings-h', text: '盯采公众号' });
     this.renderPicker(containerEl);
