@@ -1,8 +1,14 @@
 {
   "obsidianDir": "~/Documents/Obsidian/剪藏笔记",
   "accounts": [
-    { "name": "机器之心", "bookId": "MP_WXS_3073282833" },
-    { "name": "量子位", "bookId": "MP_WXS_3236757533" }
+    {
+      "name": "机器之心",
+      "bookId": "MP_WXS_3073282833"
+    },
+    {
+      "name": "量子位",
+      "bookId": "MP_WXS_3236757533"
+    }
   ],
   "perAccount": 20,
   "delayListMs": 1200,
@@ -16,5 +22,6 @@
     "profileDir": "~/.weread-monitor/chrome-profile",
     "headless": true,
     "closeWhenOwned": true
-  }
+  },
+  "dedupeDirs": []
 }

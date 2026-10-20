@@ -1,7 +1,7 @@
 ---
 name: weread-mp-monitor
 description: "微信读书公众号盯采与全量归档进 Obsidian。"
-version: 1.14.0
+version: 1.15.0
 author: 紫苏子ACG（pixelxzen）
 license: MIT
 metadata:
@@ -125,7 +125,25 @@ curl -s 'https://weread.qq.com/api/skills/apikeyGet' \
 
 **判活各看各处：** 本 skill 看 `~/.weread-monitor/last-run.json` 的 `runAt / written / results`；插件看 `data.json` 的 `state.lastRun.error`（出现 `列表：登录态过期，需重新扫码 (-2012)` 就是插件这条挂了）。**两条通道故障独立**：插件挂 ≠ 脚本挂。别因为插件报错就断言「微信读书采集停了」——先看 `last-run.json` 的时间戳，它才代表脚本侧是否在跑。
 
-**去重纪律：一个 vault 只留一条微信读书写入通道。** 本 skill 脚本与 Obsidian 插件 weread-mp 若盯同一批号，各自按自己的 `state.json` / `state.processed` 去重，**跨通道完全不去重** → 同标题笔记落两处（实测已出现同名重复）。处置二选一：关掉插件的 `autoStart`，或把 `config.obsidianDir` 与插件 `outputDir` 统一到同一目录、只保留一套 state。
+**去重纪律（1.15.0 起有闸门兜底）**：本 skill 脚本与 Obsidian 插件 weread-mp 各自按自己的 `state.json` / `state.processed` 去重，**跨通道互不知道对方写过什么** → 同一篇会落两份（实测出现过同名重复）。
+
+现在**落盘前**做三道检查，命中就跳过（不下载正文、不下载图片）：
+
+| 检查 | 命中原因码 | 含义 |
+|---|---|---|
+| 目标目录里已有同名文件 | `target-exists` | 同目录同名（最直观的那种重复） |
+| `frontmatter.source` 里同一个 reviewId | `same-review` | 同一篇文章（最准，跨标题改写也拦得住） |
+| 任一 `config.dedupeDirs` 目录里已有同名 slug | `same-title` | 另一条通道（如插件 `outputDir`）已归档过 |
+
+日志里显示 `⤵ 跳过（原因）标题`；`state.processed` 里记 `skipped: <原因码>`；`--json-out` 的摘要里 `dupSkipped` 是累计跳过数。
+
+**要两条通道并存**：把插件的输出目录写进 `config.dedupeDirs`：
+
+```json
+{ "obsidianDir": "<脚本自己的归档目录>", "dedupeDirs": ["<插件的 outputDir 绝对路径>"] }
+```
+
+**更彻底的做法仍然二选一**：关掉插件 `autoStart`，或把 `config.obsidianDir` 与插件 `outputDir` 统一到同一目录只留一套 state。闸门是安全网，不是替代——它省掉重复落盘，但两条通道还是会各花一份请求额度。
 
 ## 安装（一次性）
 
@@ -329,6 +347,7 @@ tail -f ~/.weread-monitor/logs/monitor.log
 
 | 版本 | 日期 | 说明 |
 |---|---|---|
+| 1.15.0 | 2026-10-20 | 落盘闸门：标题同名 / reviewId 同源 / `dedupeDirs` 跨目录同名，命中即跳过（不发正文请求），state 记 `skipped` 原因、summary 出 `dupSkipped`；新增 `config.dedupeDirs` 让脚本通道与 Obsidian 插件通道并存不重复；实测 5 个用例（含 rememberNote 增量）全过 |
 | 1.14.0 | 2026-10-20 | 补坑 16：`--max` / 单批上限只限本次下载量，未抓的保持 `pending`（待抓）而非标记失败；客户端实现分批归档时两条硬规则——判重必须在发请求前完成并回写索引（否则幽灵 pending 吃满单批名额、永跑不完），收尾进度不得拿全集篇数当 total（本批量 / 全库库存分两行），并给「继续下一批」入口 |
 | 1.13.0 | 2026-10-20 | **纠正分页模型**：`/web/mp/articles` 是「每页 20 个槽位」而非「每页 20 条」（实测 20/19/9/0），offset 必须固定 +20，「返回 0 条」才是到底——按返回条数累加会重复一条，按「<20 条」判最后一页会提前封底；风控纪律补**分钟级窗口**（≤8 次/分钟，1 分钟内 10 次即把全会话打成 `-2012 登录超时`，连 `/web/user` 都读不出）；补 `-2041` 的实测恢复动作（手机 App 打开该号任一篇文章，当日解除）；新增坑 15「验证分页不要循环 curl 打线上，先落 fixture 再离线推演」 |
 | 1.12.0 | 2026-10-18 | 新增「Obsidian 插件 cookie 过期抢救」五步法：复制专用 profile → playwright 取 11 项（含内存态 `wr_gid`）→ 用同款列表接口 200/20 条做硬校验 → 原子写 `data.json`（备份 + 回读断言）→ 重启 Obsidian 强制重读；钉死「插件校验只看四项存在不看值，空值 cookie 必然 -2012」「重启后要等满 interval 才有首轮」「webLogin 通道可独立存活，lastRun.at 前进 + written>0 才算活」；收尾验证归档为 `scripts/plugin_cookie_check.py`（基线比对轮询，区分「没到点」与「真坏了」）；钉死「`written` 是内部计数，落盘以 `find -newermt` 实数对账，差的那篇如实报未对平」 |

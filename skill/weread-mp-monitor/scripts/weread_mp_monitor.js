@@ -243,6 +243,71 @@ async function downloadImages(urls, dir) {
   return { map, ok, fail: urls.length - ok };
 }
 
+// ---------- 落盘闸门：同名 / 同源笔记防重（双通道并存必需） ----------
+// 场景：同一台机器上 Obsidian 插件与本脚本都盯同一个号，两边各有一套去重索引
+// （插件 data.json / 本脚本 state.json）互不知道对方写过什么 → 同一篇会落两份。
+// 这里在**落盘前**做三道检查：
+//   ① 目标目录里已有同名文件            → target-exists
+//   ② frontmatter 的 source 里同一个 reviewId → same-review（最准）
+//   ③ 任一归档目录里已有同名 slug        → same-title
+// 命中就跳过并在 state.processed 记一条 skipped 原因，不下载正文、不下载图片。
+const DEDUPE = { reviewIds: new Set(), slugs: new Set(), dirs: [], scanned: 0 };
+const DUP_LABEL = {
+    'target-exists': '目标目录已有同名文件',
+    'same-review': '同一篇已归档过',
+    'same-title': '其它归档目录已有同名笔记',
+};
+let dupSkipped = 0;
+
+function slugKey(name) {
+    return String(name).replace(/\.md$/i, '').replace(/\s+/g, '').toLowerCase();
+}
+
+function dedupeDirsOf(obsDir) {
+    const dirs = [obsDir];
+    for (const d of (CONFIG.dedupeDirs || [])) {
+        if (d) dirs.push(String(d).replace(/^~(?=$|\/)/, os.homedir()));
+    }
+    return [...new Set(dirs)].filter((d) => { try { return fs.statSync(d).isDirectory(); } catch (e) { return false; } });
+}
+
+function buildDedupeIndex(obsDir) {
+    DEDUPE.dirs = dedupeDirsOf(obsDir);
+    DEDUPE.reviewIds.clear();
+    DEDUPE.slugs.clear();
+    DEDUPE.scanned = 0;
+    for (const root of DEDUPE.dirs) {
+        for (const ent of fs.readdirSync(root, { withFileTypes: true })) {
+            if (!ent.isDirectory() || ent.name === 'assets') continue;
+            const sub = path.join(root, ent.name);
+            for (const fn of fs.readdirSync(sub)) {
+                if (!fn.toLowerCase().endsWith('.md')) continue;
+                DEDUPE.slugs.add(slugKey(fn));
+                DEDUPE.scanned++;
+                try {
+                    const head = fs.readFileSync(path.join(sub, fn), 'utf8').slice(0, 800);
+                    const m = head.match(/^source:\s*"?weread:\/\/([A-Za-z0-9_-]+)/m);
+                    if (m) DEDUPE.reviewIds.add(m[1]);
+                } catch (e) { /* 读不到就只按文件名判 */ }
+            }
+        }
+    }
+    console.log(`  [dedupe] 索引 ${DEDUPE.scanned} 篇已有笔记 · ${DEDUPE.reviewIds.size} 个 reviewId · 目录 ${DEDUPE.dirs.join(' · ') || '(无)'}`);
+}
+
+function dupReason(item, obsDir) {
+    const slug = slugify(item.title || item.reviewId);
+    if (fs.existsSync(path.join(obsDir, slug + '.md'))) return 'target-exists';
+    if (item.reviewId && DEDUPE.reviewIds.has(item.reviewId)) return 'same-review';
+    if (DEDUPE.slugs.has(slugKey(slug + '.md'))) return 'same-title';
+    return '';
+}
+
+function rememberNote(item, slug) {
+    if (item.reviewId) DEDUPE.reviewIds.add(item.reviewId);
+    DEDUPE.slugs.add(slugKey(slug + '.md'));
+}
+
 function writeNote(item, content, assetMap, obsDir) {
   const today = new Date().toISOString().slice(0, 10);
   const slug = slugify(item.title || item.reviewId);
@@ -272,11 +337,24 @@ function writeNote(item, content, assetMap, obsDir) {
 // ---------- 抓一篇（正文+图片+笔记） ----------
 let written = 0;
 async function saveOne(page, item, obsDir) {
+  // 闸门：同名 / 同源先判，命中就不发正文请求（省额度，也避免双通道重复落盘）
+  const dup = dupReason(item, obsDir);
+  if (dup) {
+    dupSkipped++;
+    state.processed[item.reviewId] = {
+      account: item.mpName || item.account, title: item.title, time: item.time,
+      note: '', at: Date.now(), skipped: dup,
+    };
+    if (state.pending) delete state.pending[item.reviewId];
+    console.log(`  ⤵ 跳过（${DUP_LABEL[dup]}）${String(item.title).slice(0, 30)}`);
+    return null;
+  }
   const c = await fetchContent(page, item.reviewId);
   if (c.error) { console.error(`  ✗ ${String(item.title).slice(0, 26)}: ${c.error}`); return null; }
   const slug = slugify(item.title || item.reviewId);
   const { map, ok, fail } = await downloadImages(c.images, path.join(obsDir, 'assets', slug));
   const p = writeNote(item, c, map, obsDir);
+  rememberNote(item, slug);
   state.processed[item.reviewId] = { account: item.mpName || item.account, title: item.title, time: item.time, note: p, at: Date.now() };
   delete state.pending[item.reviewId];
   written++;
@@ -292,6 +370,7 @@ async function saveOne(page, item, obsDir) {
 // ---------- 主流程 ----------
 async function main0() {
   const obsDir = String(cfg.obsidianDir).replace('~', os.homedir());
+  buildDedupeIndex(obsDir);
   fs.mkdirSync(obsDir, { recursive: true });
   const map = await shelfMap();
   const want = BACKFILL || LISTONLY || ONLY.length ? [BACKFILL || LISTONLY || ONLY[0]] : null;
@@ -307,7 +386,7 @@ async function main0() {
 
   const { ctx, own } = await connect();
   const page = await getPage(ctx);
-  const summary = { mode: BACKFILL ? 'backfill' : (LISTONLY ? 'list' : 'monitor'), runAt: new Date().toISOString(), accounts: targets.length, newFound: 0, written: 0, results: [], limited: false };
+  const summary = { mode: BACKFILL ? 'backfill' : (LISTONLY ? 'list' : 'monitor'), runAt: new Date().toISOString(), accounts: targets.length, newFound: 0, written: 0, dupSkipped: 0, results: [], limited: false };
   let stop = 'done';
   try {
     if (SEED) {
@@ -409,6 +488,7 @@ async function main0() {
   saveState();
   console.log(`[done] 本轮落盘 ${written} 篇；state: ${STATE}`);
   console.log(JSON.stringify(summary, null, 2));
+  summary.dupSkipped = dupSkipped;
   if (JSON_OUT) fs.writeFileSync(JSON_OUT, JSON.stringify(summary, null, 2));
   if (own && cfg.chrome?.closeWhenOwned) await ctx.close();
   process.exit(stop === 'risk' ? 4 : (stop === 'error' ? 9 : 0));
