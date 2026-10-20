@@ -23,5 +23,6 @@
     "headless": true,
     "closeWhenOwned": true
   },
-  "dedupeDirs": []
+  "dedupeDirs": [],
+  "skipIfPluginRecentMin": 30
 }

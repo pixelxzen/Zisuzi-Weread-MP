@@ -37,6 +37,70 @@ const { chromium } = loadPW();
 // ---------- 参数 ----------
 const args = process.argv.slice(2);
 const argOf = (k, d) => { const i = args.indexOf(k); return i >= 0 ? args[i + 1] : d; };
+/** 从任意子目录向上找 Obsidian 库根（含 .obsidian 的那层） */
+function findVaultRoot(start) {
+    let d = path.resolve(start);
+    for (let i = 0; i < 8; i++) {
+        if (fs.existsSync(path.join(d, '.obsidian'))) return d;
+        const up = path.dirname(d);
+        if (up === d) break;
+        d = up;
+    }
+    return '';
+}
+
+/**
+ * 自动发现 Obsidian 插件的归档目录（不用用户手填 dedupeDirs）。
+ * 判据：从 obsidianDir 往上找到库根 → 读插件 data.json 的 settings.outputDir。
+ */
+function pluginArchiveDir(obsDir) {
+    try {
+        const vault = findVaultRoot(obsDir);
+        if (!vault) return '';
+        const dj = path.join(vault, '.obsidian', 'plugins', 'zisuzi-weread-mp', 'data.json');
+        if (!fs.existsSync(dj)) return '';
+        const d = JSON.parse(fs.readFileSync(dj, 'utf8'));
+        const out = d && d.settings && d.settings.outputDir;
+        if (!out) return '';
+        const p = path.join(vault, out);
+        return fs.existsSync(p) ? p : '';
+    } catch (e) {
+        return '';
+    }
+}
+
+/** 读插件的盯采状态：判断「两边同时跑会不会把请求量叠爆」 */
+function pluginRuntimeInfo(obsDir) {
+    try {
+        const vault = findVaultRoot(obsDir);
+        if (!vault) return null;
+        const dj = path.join(vault, '.obsidian', 'plugins', 'zisuzi-weread-mp', 'data.json');
+        if (!fs.existsSync(dj)) return null;
+        const d = JSON.parse(fs.readFileSync(dj, 'utf8'));
+        const s = (d && d.settings) || {};
+        const st = (d && d.state) || {};
+        return {
+            intervalMin: Number(s.intervalMin) || 0,
+            autoStart: !!s.autoStart,
+            accounts: Array.isArray(s.accounts) ? s.accounts.map((a) => a && a.name).filter(Boolean) : [],
+            lastRunAt: Number((st.lastRun || {}).at) || 0,
+            outputDir: s.outputDir || '',
+            vault,
+        };
+    } catch (e) {
+        return null;
+    }
+}
+
+// ---------- 落盘闸门状态（必须在 main0() 调用点之前初始化，否则 TDZ）----------
+const DEDUPE = { reviewIds: new Set(), slugs: new Set(), dirs: [], scanned: 0 };
+const DUP_LABEL = {
+    'target-exists': '目标目录已有同名文件',
+    'same-review': '同一篇已归档过',
+    'same-title': '其它归档目录已有同名笔记',
+};
+let dupSkipped = 0;
+
 const CONFIG = argOf('--config', path.join(os.homedir(), '.weread-monitor', 'config.json'));
 const DRY = args.includes('--dry-run');
 const SLOW = args.includes('--slow');
@@ -243,28 +307,15 @@ async function downloadImages(urls, dir) {
   return { map, ok, fail: urls.length - ok };
 }
 
-// ---------- 落盘闸门：同名 / 同源笔记防重（双通道并存必需） ----------
-// 场景：同一台机器上 Obsidian 插件与本脚本都盯同一个号，两边各有一套去重索引
-// （插件 data.json / 本脚本 state.json）互不知道对方写过什么 → 同一篇会落两份。
-// 这里在**落盘前**做三道检查：
-//   ① 目标目录里已有同名文件            → target-exists
-//   ② frontmatter 的 source 里同一个 reviewId → same-review（最准）
-//   ③ 任一归档目录里已有同名 slug        → same-title
-// 命中就跳过并在 state.processed 记一条 skipped 原因，不下载正文、不下载图片。
-const DEDUPE = { reviewIds: new Set(), slugs: new Set(), dirs: [], scanned: 0 };
-const DUP_LABEL = {
-    'target-exists': '目标目录已有同名文件',
-    'same-review': '同一篇已归档过',
-    'same-title': '其它归档目录已有同名笔记',
-};
-let dupSkipped = 0;
-
 function slugKey(name) {
     return String(name).replace(/\.md$/i, '').replace(/\s+/g, '').toLowerCase();
 }
 
 function dedupeDirsOf(obsDir) {
     const dirs = [obsDir];
+    // 自动并入 Obsidian 插件的归档目录（两个目录不同时，这是唯一能发现重复的办法）
+    const auto = pluginArchiveDir(obsDir);
+    if (auto) dirs.push(auto);
     for (const d of (CONFIG.dedupeDirs || [])) {
         if (d) dirs.push(String(d).replace(/^~(?=$|\/)/, os.homedir()));
     }
@@ -291,6 +342,12 @@ function buildDedupeIndex(obsDir) {
                 } catch (e) { /* 读不到就只按文件名判 */ }
             }
         }
+    }
+    const pinfo = pluginRuntimeInfo(obsDir);
+    if (pinfo) {
+        const perDay = pinfo.intervalMin > 0 ? Math.round((1440 / pinfo.intervalMin) * Math.max(1, pinfo.accounts.length)) : 0;
+        console.log(`  [plugin] 插件通道：${pinfo.accounts.length} 个号 · 每 ${pinfo.intervalMin || '?'} 分钟 ≈ ${perDay} 次列表/天 · autoStart=${pinfo.autoStart} · 最近一轮 ${pinfo.lastRunAt ? new Date(pinfo.lastRunAt).toLocaleString() : '无'}`);
+        if (perDay > 20) console.log(`  [warn] 插件单通道已超过 20 次/天的安全线，本脚本再叠加会更容易撞 -2041`);
     }
     console.log(`  [dedupe] 索引 ${DEDUPE.scanned} 篇已有笔记 · ${DEDUPE.reviewIds.size} 个 reviewId · 目录 ${DEDUPE.dirs.join(' · ') || '(无)'}`);
 }
@@ -371,6 +428,30 @@ async function saveOne(page, item, obsDir) {
 async function main0() {
   const obsDir = String(cfg.obsidianDir).replace('~', os.homedir());
   buildDedupeIndex(obsDir);
+
+  // 方案 A（共享节流窗口）：插件刚跑过 → 本轮直接跳过，两条通道不叠加请求。
+  // 原理：插件与本脚本的请求量都算在同一个账号上，叠加才是 -2041 的真因；
+  // 笔记去重只解决落盘冗余，解决不了「账号被怼」。
+  {
+    const guardMin = Number(CONFIG.skipIfPluginRecentMin == null ? 30 : CONFIG.skipIfPluginRecentMin) || 0;
+    const pin = guardMin > 0 ? pluginRuntimeInfo(obsDir) : null;
+    if (pin && pin.autoStart && pin.lastRunAt && !BACKFILL && !SEED && !LISTONLY) {
+      const idleMin = (Date.now() - pin.lastRunAt) / 60000;
+      if (idleMin >= 0 && idleMin < guardMin) {
+        const reason = `Obsidian 插件 ${Math.round(idleMin)} 分钟前刚跑过（窗口 ${guardMin} 分钟）`;
+        console.log(`  ⏸ 跳过本轮：${reason}，两条通道不叠加请求`);
+        console.log('     要强制跑：--backfill <号>（手动全量）或 --list（只列不抓）；关掉此闸门：config.skipIfPluginRecentMin = 0');
+        const skip = {
+            mode: 'skipped-plugin-active', runAt: new Date().toISOString(),
+            accounts: 0, newFound: 0, written: 0, dupSkipped: 0, results: [], limited: false,
+            stop: 'plugin-active', skippedReason: reason,
+        };
+        if (JSON_OUT) fs.writeFileSync(JSON_OUT, JSON.stringify(skip, null, 2));
+        process.exit(0);
+      }
+      console.log(`  [guard] 插件上一轮 ${Math.round(idleMin)} 分钟前（窗口 ${guardMin} 分钟）→ 本轮正常跑`);
+    }
+  }
   fs.mkdirSync(obsDir, { recursive: true });
   const map = await shelfMap();
   const want = BACKFILL || LISTONLY || ONLY.length ? [BACKFILL || LISTONLY || ONLY[0]] : null;

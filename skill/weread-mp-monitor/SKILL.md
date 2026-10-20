@@ -1,7 +1,7 @@
 ---
 name: weread-mp-monitor
 description: "微信读书公众号盯采与全量归档进 Obsidian。"
-version: 1.15.0
+version: 1.16.0
 author: 紫苏子ACG（pixelxzen）
 license: MIT
 metadata:
@@ -142,6 +142,23 @@ curl -s 'https://weread.qq.com/api/skills/apikeyGet' \
 ```json
 { "obsidianDir": "<脚本自己的归档目录>", "dedupeDirs": ["<插件的 outputDir 绝对路径>"] }
 ```
+
+### 共享节流窗口（1.16.0，默认开 30 分钟）
+
+闸门只省落盘，**不省请求**。插件的请求量也算在同一个账号上，两条通道并跑会叠加 → 这才是 `-2041` 的真因。
+
+所以脚本每轮启动时先读插件的 `state.lastRun.at`：
+
+```json
+{ "skipIfPluginRecentMin": 30 }
+```
+
+- 插件 `autoStart=true` 且上一轮在 30 分钟内 → **本轮直接跳过**，打印
+  `⏸ 跳过本轮：Obsidian 插件 12 分钟前刚跑过（窗口 30 分钟）`，`--json-out` 里 `mode: "skipped-plugin-active"`
+- 要强制跑：`--backfill <号>`（手动全量历史）或 `--list`（只列不抓），这两个模式不受闸门限制
+- 想关掉：`skipIfPluginRecentMin: 0`
+
+实测：插件 21:30 跑过 → 脚本 21:5x 启动判定 20 分钟 < 30 → 跳过，零请求。
 
 **更彻底的做法仍然二选一**：关掉插件 `autoStart`，或把 `config.obsidianDir` 与插件 `outputDir` 统一到同一目录只留一套 state。闸门是安全网，不是替代——它省掉重复落盘，但两条通道还是会各花一份请求额度。
 
@@ -347,6 +364,7 @@ tail -f ~/.weread-monitor/logs/monitor.log
 
 | 版本 | 日期 | 说明 |
 |---|---|---|
+| 1.16.0 | 2026-10-20 | 共享节流窗口：插件上一轮在 `skipIfPluginRecentMin`（默认 30）分钟内 → 本轮直接跳过，避免两条通道把账号请求量叠爆；`--backfill` / `--list` 不受限；实测零请求跳过 |
 | 1.15.0 | 2026-10-20 | 落盘闸门：标题同名 / reviewId 同源 / `dedupeDirs` 跨目录同名，命中即跳过（不发正文请求），state 记 `skipped` 原因、summary 出 `dupSkipped`；新增 `config.dedupeDirs` 让脚本通道与 Obsidian 插件通道并存不重复；实测 5 个用例（含 rememberNote 增量）全过 |
 | 1.14.0 | 2026-10-20 | 补坑 16：`--max` / 单批上限只限本次下载量，未抓的保持 `pending`（待抓）而非标记失败；客户端实现分批归档时两条硬规则——判重必须在发请求前完成并回写索引（否则幽灵 pending 吃满单批名额、永跑不完），收尾进度不得拿全集篇数当 total（本批量 / 全库库存分两行），并给「继续下一批」入口 |
 | 1.13.0 | 2026-10-20 | **纠正分页模型**：`/web/mp/articles` 是「每页 20 个槽位」而非「每页 20 条」（实测 20/19/9/0），offset 必须固定 +20，「返回 0 条」才是到底——按返回条数累加会重复一条，按「<20 条」判最后一页会提前封底；风控纪律补**分钟级窗口**（≤8 次/分钟，1 分钟内 10 次即把全会话打成 `-2012 登录超时`，连 `/web/user` 都读不出）；补 `-2041` 的实测恢复动作（手机 App 打开该号任一篇文章，当日解除）；新增坑 15「验证分页不要循环 curl 打线上，先落 fixture 再离线推演」 |
