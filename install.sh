@@ -115,13 +115,28 @@ fetch_file() { # $1=仓库内路径  $2=落地文件
     cp "${ZWM_SRC}/${path}" "${dest}"
     return 0
   fi
+  # 1) jsDelivr（国内通常最快）
+  # 2) GitHub raw（有代理时最直接）
   for base in \
     "https://cdn.jsdelivr.net/gh/${REPO}@${TAG}" \
-    "https://raw.githubusercontent.com/${REPO}/${TAG}" \
-    "https://ghproxy.net/https://raw.githubusercontent.com/${REPO}/${TAG}"
+    "https://raw.githubusercontent.com/${REPO}/${TAG}"
   do
     url="${base}/${path}"
     if curl -fsSL --max-time 60 "${url}" -o "${dest}" 2>/dev/null && [ -s "${dest}" ]; then
+      return 0
+    fi
+  done
+  # 3) api.github.com 的 raw 媒体类型：github.com / raw 都被墙时，这个域名往往还通
+  #    （实测：某些网络下只有 api.github.com 可达）
+  if curl -fsSL --max-time 90 -H "Accept: application/vnd.github.raw" \
+       -H "X-GitHub-Api-Version: 2022-11-28" \
+       "https://api.github.com/repos/${REPO}/contents/${path}?ref=${TAG}" \
+       -o "${dest}" 2>/dev/null && [ -s "${dest}" ]; then
+    return 0
+  fi
+  # 4) 公共加速代理兜底
+  for host in "https://gh-proxy.com" "https://ghfast.top"; do
+    if curl -fsSL --max-time 60 "${host}/https://raw.githubusercontent.com/${REPO}/${TAG}/${path}" -o "${dest}" 2>/dev/null && [ -s "${dest}" ]; then
       return 0
     fi
   done

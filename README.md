@@ -103,8 +103,11 @@ flowchart LR
 或者在终端直接跑（会自动探测你的 Obsidian 库）：
 
 ```bash
+# 通道 A：jsDelivr
 curl -fsSL https://cdn.jsdelivr.net/gh/pixelxzen/Zisuzi-Weread-MP@main/install.sh | bash
-```
+
+# 通道 B：api.github.com（github.com / jsDelivr 被墙时用这条）
+curl -fsSL -H "Accept: application/vnd.github.raw" "https://api.github.com/repos/pixelxzen/Zisuzi-Weread-MP/contents/install.sh?ref=main" | bash
 
 装什么、参数、卸载、隐私说明 → **[INSTALL.md](INSTALL.md)**。下面是手动安装方式，仍然有效。
 

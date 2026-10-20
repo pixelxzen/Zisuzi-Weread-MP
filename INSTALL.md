@@ -17,8 +17,11 @@
 自动探测 Obsidian 记录的库（只有一个库时会直接用）：
 
 ```bash
+# 通道 A：jsDelivr（多数网络最快）
 curl -fsSL https://cdn.jsdelivr.net/gh/pixelxzen/Zisuzi-Weread-MP@main/install.sh | bash
-```
+
+# 通道 B：api.github.com（github.com / jsDelivr 被墙时用这条，实测最稳）
+curl -fsSL -H "Accept: application/vnd.github.raw" "https://api.github.com/repos/pixelxzen/Zisuzi-Weread-MP/contents/install.sh?ref=main" | bash
 
 有多个库时指定一个：
 
@@ -35,7 +38,7 @@ curl -fsSL https://cdn.jsdelivr.net/gh/pixelxzen/Zisuzi-Weread-MP@main/install.s
 ... | bash -s -- --dry-run
 ```
 
-> 镜像说明：脚本会按 `jsDelivr → GitHub raw → ghproxy` 依次回退，国内网络一般第一条就通。
+> 脚本内部按 `jsDelivr → GitHub raw → api.github.com → ghproxy` 依次回退，四条都不通才报错。
 > 取不到最新 release 号时自动回退 `main` 分支。
 
 ## 它到底装了什么
