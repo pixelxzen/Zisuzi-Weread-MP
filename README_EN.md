@@ -248,9 +248,7 @@ Outputs `main.js` / `manifest.json` / `styles.css` at the repo root. Architectur
 
 ## Star History
 
-<a href="https://star-history.com/#pixelxzen/Zisuzi-Weread-MP&Date">
-  <img src="https://api.star-history.com/svg?repos=pixelxzen/Zisuzi-Weread-MP&type=Date" alt="Star History Chart" width="720" />
-</a>
+[![RepoStars](https://repostars.dev/api/embed?repo=pixelxzen%2FZisuzi-Weread-MP&theme=grape)](https://repostars.dev/?repos=pixelxzen%2FZisuzi-Weread-MP&theme=grape)
 
 ## License
 
