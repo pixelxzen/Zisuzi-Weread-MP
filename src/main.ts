@@ -2825,7 +2825,7 @@ export default class WereadMpCatcher extends Plugin {
       return;
     }
 
-    await this.app.fileManager.processFrontMatter(file, (fm) => {
+    await this.app.fileManager.processFrontMatter(file, (fm: Record<string, unknown>) => {
       fm.green_book = true;
       fm.mp_source = url;
       fm.green_pages = ok;
@@ -2889,8 +2889,8 @@ export default class WereadMpCatcher extends Plugin {
       const bmpW = bmp.width;
       const bmpH = bmp.height;
       if (bmp.close) bmp.close();
-      const d = ctx.getImageData(0, 0, S, S).data;
-      const sig: number[] = new Array(S * S);
+      const d = ctx.getImageData(0, 0, S, S).data as Uint8ClampedArray;
+      const sig: number[] = new Array<number>(S * S);
       // Rec.601 亮度：8×8 dHash 对大面积留白的排版不够分辨（会把文字页并进插画页），
       // 32×32 灰度 + MAD 才能把「这一篇，留给桂花」和茶壶分成两簇
       for (let i = 0; i < S * S; i++) {
@@ -2898,7 +2898,7 @@ export default class WereadMpCatcher extends Plugin {
       }
       return { sig, bytes, w: bmpW, h: bmpH };
     } catch {
-      return { sig: new Array(1024).fill(0), bytes: `${bytes}:undecodable:${salt}`, w: 0, h: 0 };
+      return { sig: new Array<number>(1024).fill(0), bytes: `${bytes}:undecodable:${salt}`, w: 0, h: 0 };
     }
   }
 
@@ -2946,7 +2946,7 @@ export default class WereadMpCatcher extends Plugin {
       const p = localPaths[i];
       if (!p) {
         bufs.push(new ArrayBuffer(0));
-        sigs.push({ sig: new Array(1024).fill(0), bytes: `missing:${i}`, w: 0, h: 0 });
+        sigs.push({ sig: new Array<number>(1024).fill(0), bytes: `missing:${i}`, w: 0, h: 0 });
         continue;
       }
       const rel = normalizePath(`${assetDir}/${p.split('/').pop() as string}`);

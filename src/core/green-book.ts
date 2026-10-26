@@ -130,11 +130,6 @@ function numField(objText: string, name: string): number {
   return m ? parseInt(m[1], 10) : 0;
 }
 
-function strField(objText: string, name: string): string {
-  const m = new RegExp(name + "\\s*:\\s*['\"]([^'\"]*)['\"]").exec(objText);
-  return m ? cleanUrl(m[1]) : '';
-}
-
 /** 把 picture_page_info_list 解析成图片清单（已过滤装饰/二维码由调用方决定） */
 export function parsePicturePages(html: string): PicturePage[] {
   const arr = extractJsArray(html, 'picture_page_info_list');

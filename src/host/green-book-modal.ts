@@ -24,9 +24,9 @@ export class GreenBookModal extends Modal {
     });
 
     new Setting(contentEl).setName('原文链接').addText((t) => {
-      t.setPlaceholder('https://mp.weixin.qq.com/s/...');
+      t.setPlaceholder('粘贴原文链接');
       t.onChange((v) => (this.url = v.trim()));
-      t.inputEl.style.width = '100%';
+      t.inputEl.setCssProps({ width: '100%' });
       window.setTimeout(() => t.inputEl.focus(), 50);
       t.inputEl.addEventListener('keydown', (ev: KeyboardEvent) => {
         if (ev.key === 'Enter') this.submit();
@@ -43,7 +43,7 @@ export class GreenBookModal extends Modal {
 
   private submit(): void {
     const u = this.url.trim();
-    if (!/^https?:\/\/mp\.weixin\.qq\.com\/s[\/?]/i.test(u)) {
+    if (!/^https?:\/\/mp\.weixin\.qq\.com\/s[/?]/i.test(u)) {
       new Notice('请贴 mp.weixin.qq.com/s/... 形式的链接', 6000);
       return;
     }
