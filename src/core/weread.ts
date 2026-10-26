@@ -357,7 +357,24 @@ export class WereadClient {
     const url = `https://weread.qq.com/web/mp/content?reviewId=${encodeURIComponent(reviewId)}`;
     const r = await this.http(url, this.headers());
     if (r.status !== 200) throw new Error(`正文 HTTP ${r.status}`);
-    return r.text;
+    // 正文正常返回的是 HTML 文档；登录失效/受限时返回的是 JSON：{"errCode":-2012,...}
+    // 不判这一层，错误体就会被当成「空正文」，一路掉进小绿书分支，
+    // 静默写出一篇只有封面+摘要的半截笔记（2026-10-26 实测踩到：195 切片全丢、无任何报错）。
+    // 这里必须 fail-closed：宁可这一篇失败并提示扫码，也不能产出假笔记。
+    const t = r.text;
+    if (t.trimStart().startsWith('{')) {
+      let j: unknown = null;
+      try {
+        j = JSON.parse(t);
+      } catch {
+        /* 不是完整 JSON，走下面兜底 */
+      }
+      if (isObj(j) && (j.errcode !== undefined || j.errCode !== undefined)) {
+        assertNoRisk(j, '正文'); // 风控码 → RiskError(-2012)，UI 会提示重新扫码
+      }
+      throw new Error('正文接口返回异常（不是 HTML 文档）');
+    }
+    return t;
   }
 
   /** 尽力把微信播放器 iframe 解析成直链 mp4；拿不到就返回原 url */

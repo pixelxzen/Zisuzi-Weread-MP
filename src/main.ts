@@ -26,6 +26,10 @@ import {
   RiskError,
 } from './core/weread';
 import { htmlToMarkdown, replaceImagePlaceholders, replaceMediaPlaceholders, safeFileName } from './core/html2md';
+import { detectSvgBitmap, buildSvgBitmapMarkdown, type SvgBitmapResult } from './core/svg-slices';
+import { planReel, buildReelSvg, type FrameSig, type ReelImage, type ReelPlan } from './core/reel';
+import { detectGreenBook, greenBookMeta, contentPages, pageExt } from './core/green-book';
+import { GreenBookModal } from './host/green-book-modal';
 import { WmcView, VIEW_TYPE_WMC } from './host/view-linear';
 import { BackfillModal } from './host/backfill-modal';
 import { ASSET_AVATAR, ASSET_MP_QR, ASSET_TIP_QR } from './core/assets';
@@ -142,6 +146,26 @@ export interface WMSettings {
   delayListMs: number;
   delayContentMs: number;
   downloadImages: boolean;
+  /** 序列帧文章生成自播 reel（去重 + 停顿加权 + 内联 WebP） */
+  reelEnabled: boolean;
+  /** reel 每个权重单位对应多少毫秒（默认 250） */
+  reelSlotMs: number;
+  /** dHash 汉明距阈值，> 该值才算新画面（默认 6） */
+  reelThreshold: number;
+  /** reel 的 MAD 阈值（默认 0.01，收紧保运动） */
+  reelMotionThreshold: number;
+  /** 静帧的 MAD 阈值（默认 0.05，放宽到页面级） */
+  reelStillsThreshold: number;
+  /** 静帧最小停留权重，低于此值的过渡态不出图（默认 2） */
+  reelStillsMinWeight: number;
+  /** 尾卡高度阈值比：末段切片高度 < 正文众数高 × 该比值 → 判为品牌/社媒卡，不进帧序列（默认 0.6） */
+  reelTailHeightRatio: number;
+  /** 长序列段内每多少原帧抽 1 帧（默认 8） */
+  reelSampleEvery: number;
+  /** WebP 质量 1–100（默认 70） */
+  reelQuality: number;
+  /** reel 画布最大宽度（默认 900） */
+  reelMaxWidth: number;
   autoStart: boolean;
 }
 
@@ -203,6 +227,16 @@ const DEFAULTS: WMSettings = {
   delayListMs: 1200,
   delayContentMs: 2500,
   downloadImages: true,
+  reelEnabled: true,
+  reelSlotMs: 250,
+  reelThreshold: 6,
+  reelMotionThreshold: 0.01,
+  reelStillsThreshold: 0.05,
+  reelStillsMinWeight: 2,
+  reelTailHeightRatio: 0.6,
+  reelSampleEvery: 8,
+  reelQuality: 70,
+  reelMaxWidth: 900,
   autoStart: false,
 };
 
@@ -613,6 +647,11 @@ export default class WereadMpCatcher extends Plugin {
       id: 'logout-account',
       name: '退出微信读书账号（清空登录态后可重新扫码）',
       callback: () => void this.logoutAccount(),
+    });
+    this.addCommand({
+      id: 'fill-green-book',
+      name: '补全小绿书（贴原链接）',
+      callback: () => this.openGreenBookModal(),
     });
     this.addCommand({
       id: 'repair-images',
@@ -2702,6 +2741,319 @@ export default class WereadMpCatcher extends Plugin {
     }
   }
 
+  /* ------------------------------ 小绿书补全 ------------------------------ */
+
+  private openGreenBookModal(): void {
+    new GreenBookModal(this.app, (url) => void this.fillGreenBook(url)).open();
+  }
+
+  /**
+   * 用原页（mp.weixin.qq.com）补全小绿书正文。
+   * 微信读书对图片消息只给封面+摘要，正文只能回原页抓：
+   *   window.picture_page_info_list[].cdn_url
+   * 注意 mmbiz_svg 是内页本体（矢量长图），必须按 .svg 存，当 jpg 会是坏图。
+   */
+  private async fillGreenBook(url: string): Promise<void> {
+    const file = this.app.workspace.getActiveFile();
+    if (!file) {
+      new Notice('请先打开要补全的那篇笔记');
+      return;
+    }
+    const UA =
+      'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36';
+    const headers = {
+      'User-Agent': UA,
+      Referer: 'https://mp.weixin.qq.com/',
+      'Accept-Language': 'zh-CN,zh;q=0.9',
+    };
+
+    let html = '';
+    try {
+      const r = await requestUrl({ url, method: 'GET', headers, throw: false });
+      if (r.status !== 200) throw new Error(`HTTP ${r.status}`);
+      html = r.text;
+    } catch (e) {
+      new Notice(`抓原页失败：${(e as Error).message}`, 8000);
+      return;
+    }
+
+    const det = detectGreenBook(html);
+    const pages = contentPages(det.pages);
+    if (!pages.length) {
+      new Notice(
+        det.pages.length
+          ? '只找到二维码 / 无关图，未补全'
+          : '这条链接里没有小绿书图列表（可能是普通图文，请用「补全当前笔记的图片」）',
+        8000,
+      );
+      return;
+    }
+
+    const meta = greenBookMeta(html);
+    const title = meta.title || file.basename;
+    const base = safeFileName(title || file.basename);
+    const assetDir = normalizePath(`${this.settings.outputDir}/assets/${base}`);
+    await this.ensureFolder(assetDir);
+
+    const lines: string[] = [];
+    let ok = 0;
+    for (let i = 0; i < pages.length; i++) {
+      const p = pages[i];
+      const ext = pageExt(p);
+      const name = `green-${String(i + 1).padStart(2, '0')}.${ext}`;
+      try {
+        const rr = await requestUrl({
+          url: p.url.replace(/^http:/, 'https:'),
+          method: 'GET',
+          headers,
+          throw: false,
+        });
+        if (rr.status !== 200) throw new Error(`HTTP ${rr.status}`);
+        const buf = rr.arrayBuffer;
+        if (!buf || buf.byteLength < 200) throw new Error('内容为空');
+        await this.app.vault.adapter.writeBinary(normalizePath(`${assetDir}/${name}`), buf);
+        ok++;
+        lines.push(`![](${'<' + `../assets/${base}/${name}` + '>'})`);
+        lines.push('');
+      } catch (e) {
+        this.pushLog(`小绿书第 ${i + 1} 页失败：${(e as Error).message}`, 'warn');
+      }
+      await sleep(120);
+    }
+    if (!ok) {
+      new Notice('所有页都下载失败，未改动笔记', 8000);
+      return;
+    }
+
+    await this.app.fileManager.processFrontMatter(file, (fm) => {
+      fm.green_book = true;
+      fm.mp_source = url;
+      fm.green_pages = ok;
+      if (meta.digest) fm.digest = meta.digest;
+      if (meta.author) fm.author_org = `${meta.author}（微信公众号）`;
+    });
+
+    const bodyParts: string[] = [
+      '## 正文',
+      '',
+      `> 本文为**小绿书（微信图片消息）**，正文共 **${ok}** 页。SVG 内页在 Obsidian 里直接渲染，带 SMIL 动画的会自己播。`,
+      `> 原页：${url}`,
+    ];
+    if (meta.digest) bodyParts.push(`> 摘要：${meta.digest}`);
+    bodyParts.push('');
+    for (const l of lines) bodyParts.push(l);
+    const body = bodyParts.join('\n');
+
+    const cur = await this.app.vault.read(file);
+    const idx = cur.indexOf('## 正文');
+    const head = idx >= 0 ? cur.slice(0, idx) : cur.trimEnd() + '\n\n';
+    await this.app.vault.modify(file, head + body + '\n');
+    new Notice(`小绿书已补全 ${ok} 页 → ${base}`, 6000);
+    this.pushLog(`小绿书补全：${title} · ${ok} 页`, 'ok');
+  }
+
+  /* ------------------------------ 序列帧 reel ------------------------------ */
+
+  /** ArrayBuffer → base64（分段，避免 apply 参数上限） */
+  private abToB64(ab: ArrayBuffer): string {
+    const u8 = new Uint8Array(ab);
+    let s = '';
+    const CH = 0x8000;
+    for (let i = 0; i < u8.length; i += CH) {
+      const sub = u8.subarray(i, i + CH);
+      s += String.fromCharCode.apply(null, Array.from(sub));
+    }
+    return btoa(s);
+  }
+
+  /** 32×32 灰度签名 + 廉价字节指纹 + 原图尺寸；解码失败返回全黑签名（MAD 必然很大 → 独立成簇） */
+  private async frameSig(buf: ArrayBuffer, salt: string): Promise<FrameSig & { w: number; h: number }> {
+    const u8 = new Uint8Array(buf);
+    let h1 = 5381;
+    let h2 = 52711;
+    for (let i = 0; i < u8.length; i++) {
+      h1 = ((h1 * 33) ^ u8[i]) >>> 0;
+      h2 = ((h2 * 31) + u8[i]) >>> 0;
+    }
+    const bytes = `${u8.length}:${h1}:${h2}`;
+    try {
+      if (typeof createImageBitmap === 'undefined' || typeof OffscreenCanvas === 'undefined') throw new Error('no canvas');
+      const bmp = await createImageBitmap(new Blob([buf]));
+      const S = 32;
+      const cv = new OffscreenCanvas(S, S);
+      const ctx = cv.getContext('2d');
+      if (!ctx) throw new Error('no ctx');
+      ctx.fillStyle = '#fff';
+      ctx.fillRect(0, 0, S, S);
+      ctx.drawImage(bmp, 0, 0, S, S);
+      const bmpW = bmp.width;
+      const bmpH = bmp.height;
+      if (bmp.close) bmp.close();
+      const d = ctx.getImageData(0, 0, S, S).data;
+      const sig: number[] = new Array(S * S);
+      // Rec.601 亮度：8×8 dHash 对大面积留白的排版不够分辨（会把文字页并进插画页），
+      // 32×32 灰度 + MAD 才能把「这一篇，留给桂花」和茶壶分成两簇
+      for (let i = 0; i < S * S; i++) {
+        sig[i] = 0.299 * d[i * 4] + 0.587 * d[i * 4 + 1] + 0.114 * d[i * 4 + 2];
+      }
+      return { sig, bytes, w: bmpW, h: bmpH };
+    } catch {
+      return { sig: new Array(1024).fill(0), bytes: `${bytes}:undecodable:${salt}`, w: 0, h: 0 };
+    }
+  }
+
+  /** 统一画布 + WebP 内联 data URI */
+  private async frameWebp(buf: ArrayBuffer, W: number, H: number, quality: number): Promise<string> {
+    const bmp = await createImageBitmap(new Blob([buf]));
+    const cv = new OffscreenCanvas(W, H);
+    const ctx = cv.getContext('2d');
+    if (!ctx) throw new Error('OffscreenCanvas 不可用');
+    ctx.fillStyle = '#f7f4ec';
+    ctx.fillRect(0, 0, W, H);
+    const scale = Math.min(W / bmp.width, H / bmp.height);
+    const w = Math.max(1, Math.round(bmp.width * scale));
+    const h = Math.max(1, Math.round(bmp.height * scale));
+    ctx.drawImage(bmp, Math.round((W - w) / 2), Math.round((H - h) / 2), w, h);
+    const srcW = bmp.width;
+    const srcH = bmp.height;
+    if (bmp.close) bmp.close();
+    const out = await cv.convertToBlob({ type: 'image/webp', quality });
+    const ab = await out.arrayBuffer();
+    return `data:image/webp;base64,${this.abToB64(ab)}|${srcW}x${srcH}`;
+  }
+
+  /**
+   * 把已落盘的切片做成自播 reel。
+   * 停顿组（字节全同）→ 1 帧 + 权重=串长；序列帧组（字节不同）→ 等间隔抽样。
+   */
+  private async buildReel(
+    localPaths: string[],
+    assetDir: string,
+    dir: string,
+    base: string,
+  ): Promise<{ name: string; rel: string; plan: ReelPlan; bytes: number; tail: number[] } | null> {
+    if (!this.settings.reelEnabled) return null;
+    const have = localPaths.filter(Boolean).length;
+    if (have < 2) return null;
+    if (typeof OffscreenCanvas === 'undefined' || typeof createImageBitmap === 'undefined') {
+      this.pushLog('跳序帧 reel：当前环境没有 OffscreenCanvas', 'warn');
+      return null;
+    }
+
+    const bufs: ArrayBuffer[] = [];
+    const sigs: (FrameSig & { w: number; h: number })[] = [];
+    for (let i = 0; i < localPaths.length; i++) {
+      const p = localPaths[i];
+      if (!p) {
+        bufs.push(new ArrayBuffer(0));
+        sigs.push({ sig: new Array(1024).fill(0), bytes: `missing:${i}`, w: 0, h: 0 });
+        continue;
+      }
+      const rel = normalizePath(`${assetDir}/${p.split('/').pop() as string}`);
+      let buf = new ArrayBuffer(0);
+      try {
+        buf = await this.app.vault.adapter.readBinary(rel);
+      } catch {
+        /* 读不到就当缺帧 */
+      }
+      bufs.push(buf);
+      sigs.push(await this.frameSig(buf, String(i)));
+    }
+
+    // ---- 尾卡识别：文末的品牌图 / 社媒引导图 / 页码分隔条不属于帧序列 ----
+    // 判据：① 从文末往前连续；② 高度明显小于正文主体高度（< 比值 × 众数高度）；③ 最多 5 张。
+    // 实测样本：正文主体 1080×1322，尾部三张 1080×250（页码分隔）、1079×607（动图社媒卡）、
+    // 1080×405（微博/小红书/陌陌 COMING SOON 品牌图）——这三张绝不能并进 reel。
+    let bodyEnd = sigs.length;
+    let tailCount = 0;
+    const heights: Record<number, number> = {};
+    for (const s of sigs) if (s.h > 0) heights[s.h] = (heights[s.h] || 0) + 1;
+    let modeH = 0;
+    let modeC = 0;
+    for (const [hh, cc] of Object.entries(heights)) {
+      if (cc > modeC || (cc === modeC && Number(hh) > modeH)) {
+        modeH = Number(hh);
+        modeC = cc;
+      }
+    }
+    const ratio = this.settings.reelTailHeightRatio;
+    const limitH = modeH > 0 && modeC >= 2 ? modeH * ratio : 0;
+    if (limitH > 0) {
+      for (let i = sigs.length - 1; i >= 1 && tailCount < 5; i--) {
+        const s = sigs[i];
+        if (!localPaths[i] || s.h <= 0) break;          // 缺图不猜
+        if (s.h >= limitH) break;                        // 遇到正文高度就停
+        bodyEnd = i;
+        tailCount++;
+      }
+    }
+    const bodySigs = sigs.slice(0, bodyEnd);
+    if (tailCount)
+      this.pushLog(
+        `尾卡识别：末 ${tailCount} 张（高度 < ${limitH.toFixed(0)}px，正文众数高 ${modeH}px）不进帧序列`,
+        'ok',
+      );
+    if (bodySigs.length < 2) return null;
+
+    const plan = planReel(bodySigs, {
+      motionThreshold: this.settings.reelMotionThreshold,
+      stillsThreshold: this.settings.reelStillsThreshold,
+      stillsMinWeight: this.settings.reelStillsMinWeight,
+      sampleEvery: this.settings.reelSampleEvery,
+    });
+    if (plan.frames.length < 2) return null;
+
+    // 画布：取第一张可解码帧的比例
+    let W = 0;
+    let H = 0;
+    for (const f of plan.frames) {
+      const b = bufs[f.index];
+      if (!b || b.byteLength === 0) continue;
+      try {
+        const bmp = await createImageBitmap(new Blob([b]));
+        W = Math.min(this.settings.reelMaxWidth, bmp.width);
+        H = Math.max(1, Math.round((W * bmp.height) / bmp.width));
+        if (bmp.close) bmp.close();
+        break;
+      } catch {
+        /* 试下一张 */
+      }
+    }
+    if (!W || !H) return null;
+
+    const imgs: ReelImage[] = [];
+    const okIdx: number[] = [];
+    for (let i = 0; i < plan.frames.length; i++) {
+      const f = plan.frames[i];
+      const b = bufs[f.index];
+      if (!b || b.byteLength === 0) continue;
+      try {
+        const uri = await this.frameWebp(b, W, H, this.settings.reelQuality / 100);
+        imgs.push({ dataUri: uri.split('|')[0], weight: f.weight });
+        okIdx.push(i);
+      } catch {
+        /* 单帧失败就跳过 */
+      }
+    }
+    if (imgs.length < 2) return null;
+
+    const svg = buildReelSvg(imgs, { width: W, height: H, slotMs: this.settings.reelSlotMs });
+    if (!svg) return null;
+
+    const name = `${base}.reel.svg`;
+    const rel = normalizePath(`${dir}/${name}`);
+    await this.app.vault.adapter.write(rel, svg);
+    const bytes = svg.length;
+    this.pushLog(
+      `序列帧 reel：${plan.slices} 切片 → ${plan.poses} 个唯一画面 → reel ${imgs.length} 帧 / 静帧 ${plan.stills.length} 张` +
+        `（簇 ${plan.motionClusters}/${plan.stillsClusters}）· ${(bytes / 1048576).toFixed(2)} MB`,
+      'ok',
+    );
+    const tail: number[] = [];
+    for (let i = bodyEnd; i < localPaths.length; i++) if (localPaths[i]) tail.push(i);
+    return { name, rel, plan: { ...plan, frames: okIdx.map((i) => plan.frames[i]) }, bytes, tail };
+  }
+
   /** 笔记的落盘路径：归档索引、幂等判定、任务列表三处必须用同一个算法 */
   private notePathOf(accountName: string, title: string): string {
     const base = safeFileName(title || '(无标题)');
@@ -2733,6 +3085,25 @@ export default class WereadMpCatcher extends Plugin {
     let { markdown } = htmlToMarkdown(html);
     const { images, media } = htmlToMarkdown(html);
 
+    // SVG 交互图文（变体 B）：E2.COOL 一类编辑器把每屏排版烘焙成整图，
+    // 用 background-image 贴在多个内联 <svg> 上 —— 正文 0 个文本节点、0 个 <img>，
+    // htmlToMarkdown 三样全空。必须在小绿书分支**之前**拦下来，否则只会存成
+    // 「摘要 + 封面」的半截笔记（正文全丢）。
+    let svgBitmap: SvgBitmapResult | null = null;
+    // ⚠️ 不能用 `!markdown.trim()` 当门禁：E2.COOL 新版会在 SVG 里藏一层
+    // `opacity:0` 的「AI 语料学习文本」，htmlToMarkdown 会把它抽成几百字 →
+    // 「正文为空」守卫失效 → 整篇位图切片全丢（实测：195 张只剩 295 字引言）。
+    // 这里只要求「没有常规图片与音视频」，真伪交给 detectSvgBitmap 的 textOutsideSvg 判据。
+    if (!images.length && !media.length) {
+      const det = detectSvgBitmap(html);
+      if (det.isBitmapArticle && det.slices.length) {
+        svgBitmap = det;
+        const offset = images.length;
+        for (const s of det.slices) images.push({ src: s.src, alt: '' });
+        markdown = buildSvgBitmapMarkdown(det, offset);
+      }
+    }
+
     // 图片笔记（小绿书）：正文由前端 JS 渲染，HTML 里没有 js_content。
     // 只有封面图 + 摘要可用 —— 用它们生成一篇「图片笔记」而不是判空丢弃。
     if (!markdown.trim() && !images.length && !media.length) {
@@ -2755,6 +3126,12 @@ export default class WereadMpCatcher extends Plugin {
     const localPaths: string[] = [];
     if (this.settings.downloadImages && images.length) {
       await this.ensureFolder(assetDir);
+      // 序列帧文章的切片动辄上百张：它们来自 mmbiz CDN（不是微信读书的限流面），
+      // 按 delayContentMs/2 = 1250ms 一张会把一篇 195 张的稿子拖成 4 分钟，
+      // 所以 svg_bitmap 场景把间隔压到 ≤300ms。
+      const imgDelay = svgBitmap
+        ? Math.min(300, Math.round(this.settings.delayContentMs / 2))
+        : Math.round(this.settings.delayContentMs / 2);
       for (let i = 0; i < images.length; i++) {
         const img = images[i];
         try {
@@ -2766,9 +3143,14 @@ export default class WereadMpCatcher extends Plugin {
         } catch {
           localPaths[i] = '';
         }
-        await sleep(Math.round(this.settings.delayContentMs / 2));
+        await sleep(imgDelay);
       }
     }
+
+    // 序列帧文章：去重 + 停顿加权，生成一个自播的 reelsvg（自包含，Obsidian 可播）
+    const reel = svgBitmap && this.settings.downloadImages
+      ? await this.buildReel(localPaths, assetDir, dir, base)
+      : null;
 
     // 音视频：尽力解析直链 → 本地化 + Obsidian 播放器标签；失败降级为原站链接
     const mediaRefs: Array<{ type: 'audio' | 'video'; path?: string; url: string; name?: string }> = [];
@@ -2808,8 +3190,44 @@ export default class WereadMpCatcher extends Plugin {
     let bodyMd = replaceImagePlaceholders(markdown, localPaths);
     if (media.length) bodyMd = replaceMediaPlaceholders(bodyMd, mediaRefs);
 
+    // 有 reel 时：正文只嵌「页面级静帧」（全部切片仍在 assets，一帧不删），reel 放最前
+    let stillsCaption = '';
+    if (reel) {
+      const kept = reel.plan.stills;
+      if (kept.length >= 1) {
+        bodyMd = kept
+          .map((s) => `![](${localPaths[s.index] ? `<${localPaths[s.index]}>` : ''})` +
+            `\n\n> 停留 ${(s.weight * this.settings.reelSlotMs / 1000).toFixed(1)} s`)
+          .join('\n\n');
+      }
+      stillsCaption =
+        `> 原文 **${reel.plan.slices}** 个切片已**全部**存于 assets（含停顿帧，未删除）。` +
+        `这里只嵌 **${kept.length}** 张「页面级静帧」：按 32×32 灰度 MAD ≤ ${this.settings.reelStillsThreshold} 聚类成 ` +
+        `${reel.plan.stillsClusters} 簇，再筛掉停留权重 < ${this.settings.reelStillsMinWeight} 的过渡态。` +
+        `动效用上面的 reel。`;
+    }
+
+    // 文末品牌/社媒/分隔卡：单独一节，绝不并进帧序列
+    let tailMd = '';
+    if (reel && reel.tail.length) {
+      const lines: string[] = [];
+      lines.push('### 文末卡片（品牌 / 社媒 / 分隔，未进帧序列）');
+      lines.push('');
+      lines.push(
+        `> 尾部 **${reel.tail.length}** 张的高度明显小于正文主体（< ${(this.settings.reelTailHeightRatio * 100).toFixed(0)}% × 正文众数高度），` +
+          '判定为账号品牌图 / 社媒引导图 / 页码分隔条，**已排除在动效与页面级静帧之外**。',
+      );
+      for (const i of reel.tail) {
+        if (!localPaths[i]) continue;
+        lines.push('');
+        lines.push(`![](${'<' + localPaths[i] + '>'})`);
+      }
+      tailMd = lines.join('\n');
+    }
+
     const published = fmtDate(item.time);
     const fmTags = ['剪藏', '微信读书公众号'];
+    if (svgBitmap) fmTags.push('SVG交互图文');
     const note = [
       '---',
       `title: "${(item.title || '').replace(/"/g, '\\"')}"`,
@@ -2821,6 +3239,12 @@ export default class WereadMpCatcher extends Plugin {
       ...fmTags.map((t) => `  - ${t}`),
       item.readNum !== undefined ? `readNum: ${item.readNum}` : null,
       item.likeNum !== undefined ? `likeNum: ${item.likeNum}` : null,
+      svgBitmap ? 'svg_bitmap: true' : null,
+      svgBitmap ? `svg_slices: ${svgBitmap.stats.uniqueImages}` : null,
+      reel ? 'reel: true' : null,
+      reel ? `reel_frames: ${reel.plan.frames.length}` : null,
+      reel ? `reel_body: ${reel.plan.slices}` : null,
+      reel ? `reel_tail: ${reel.tail.length}` : null,
       `published: ${published}`,
       `created: ${ymdNow()}`,
       '---',
@@ -2833,8 +3257,30 @@ export default class WereadMpCatcher extends Plugin {
       '',
       '## 正文',
       '',
+      ...(reel
+        ? [
+            '### 动效（重建 · 可播）',
+            '',
+            `![[${reel.name}]]`,
+            '',
+            `> **重建的自动轮播**：${reel.plan.slices} 个切片 → **${reel.plan.poses}** 个字节唯一画面 → ` +
+              `**${reel.plan.frames.length}** 帧动画（${reel.plan.motionClusters} 个运动簇，每权重单位 ${this.settings.reelSlotMs} ms，` +
+              `${(reel.bytes / 1048576).toFixed(2)} MB 自包含 SVG）。`,
+            '>',
+            '> 停顿（同一画面重复导出的连续段）按原串长加权，所以「停得久」在动画里就停得久；',
+            '> 长序列段每 8 原帧抽 1 帧，不把连续微动压成一帧。',
+            '> ⚠️ **不是原文动效**：原文多用 `begin="click"` 触发翻页，而 Obsidian 的 `<img>` 上下文收不到点击事件，' +
+              '这里改成自动推进。要看原交互请回原链接。',
+            '',
+            '### 关键帧静帧（可放大读字）',
+            '',
+            stillsCaption,
+            '',
+          ]
+        : []),
       bodyMd,
       '',
+      ...(tailMd ? [tailMd, ''] : []),
     ]
       .filter((x) => x !== null)
       .join('\n');
